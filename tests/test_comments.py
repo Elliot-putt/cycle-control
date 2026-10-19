@@ -966,3 +966,12 @@ def test_a_queued_pr_is_checked_every_minute_and_others_every_five(rig):
     watcher._store.pr("o/abc#7")["checked_at"] = watcher._clock() - 61
     watcher.poll(only_due=True)
     assert fake.fetches == fetched + 1
+
+
+def test_the_default_lookup_finds_a_merged_pr(monkeypatch):
+    from cyclecontrol import commentwatch
+    from cyclecontrol.github import PrState
+
+    merged = PrState(7, "https://x/pull/7", "feature/x", "MERGED", "develop", "abc")
+    monkeypatch.setattr(commentwatch, "find_pr_any_state", lambda repo, branch: merged)
+    assert commentwatch.find_latest_pr("o/r", "feature/x").number == 7

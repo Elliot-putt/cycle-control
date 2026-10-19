@@ -34,7 +34,7 @@ from cyclecontrol.github import (
     GithubError,
     comment_on_pr,
     fetch_pr_feedback,
-    find_open_pr,
+    find_pr_any_state,
     reply_to_review_comment,
     resolve_thread,
 )
@@ -50,6 +50,13 @@ RESUME_GRACE_SECONDS = 45
 RESUME_GIVE_UP_SECONDS = 600
 
 
+def find_latest_pr(repo: str, branch: str) -> Any:
+    found = find_pr_any_state(repo, branch)
+    if found is None:
+        raise GithubError(f"No PR for {branch}")
+    return found
+
+
 class CommentWatcher:
     def __init__(
         self,
@@ -57,7 +64,7 @@ class CommentWatcher:
         sessions: SessionManager,
         store: CommentStore,
         fetch: Callable[[str, int], dict[str, Any]] = fetch_pr_feedback,
-        find_pr: Callable[[str, str], Any] = find_open_pr,
+        find_pr: Callable[[str, str], Any] = find_latest_pr,
         clock: Callable[[], float] = time.time,
         notifier: Callable[[str, str], None] = notify,
         runner: Callable[..., Any] = subprocess.run,
