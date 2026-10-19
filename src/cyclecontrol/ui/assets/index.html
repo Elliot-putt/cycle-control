@@ -1,0 +1,74 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Cycle Control</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Rajdhani:wght@500;600&family=Barlow:wght@400;500&family=JetBrains+Mono:wght@400;500&display=swap">
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/xterm@5.3.0/css/xterm.css">
+  <link rel="stylesheet" href="/static/app.css">
+</head>
+<body>
+  <div id="setup" class="setup" hidden>
+    <form id="setup-form">
+      <h1>Cycle Control</h1>
+      <p>Paste a Linear personal API key to load your cycle.</p>
+      <input id="setup-key" type="password" placeholder="lin_api_..." autocomplete="off">
+      <button class="send" type="submit">Connect</button>
+      <p id="setup-error" class="err-text"></p>
+    </form>
+  </div>
+
+  <div id="app" class="app" hidden>
+    <aside class="rail">
+      <div class="rail-h">
+        <div class="cycle"><b id="cycle-name">Cycle</b><span id="cycle-meta"></span></div>
+        <div class="burn"><i id="burn"></i></div>
+        <div class="lane-mode">
+          <div class="seg" id="filter"><button data-filter="mine">Mine</button><button data-filter="team">Team</button></div>
+          <div class="startas">
+            <small>Start as</small>
+            <div class="seg" id="startas"><button data-startas="plan">Plan</button><button data-startas="auto">Auto</button></div>
+          </div>
+        </div>
+        <p id="error" class="err-text" hidden></p>
+      </div>
+      <div class="scroll" id="list"></div>
+    </aside>
+
+    <main class="main">
+      <div id="empty" class="empty">Start an issue, or select an agent to see what it needs.</div>
+      <section id="panel" class="panel" hidden>
+        <div class="m-h">
+          <div class="m-title">
+            <span class="id mono" id="m-id"></span>
+            <h1 id="m-title"></h1>
+            <span class="pill" id="m-pill"></span>
+            <a class="ghost" id="m-linear" target="_blank">Linear ↗</a>
+            <a class="ghost" id="m-pr" target="_blank" hidden>PR ↗</a>
+            <button class="ghost" id="m-stop">Stop</button>
+          </div>
+          <div class="steps" id="m-steps"></div>
+        </div>
+        <div class="banner" id="m-banner" hidden></div>
+        <div class="tabs" id="tabs"></div>
+        <div class="body" id="body"></div>
+        <div class="composer" id="composer">
+          <div class="keys">
+            <button data-key="1">1</button><button data-key="2">2</button><button data-key="enter">Enter</button><button data-key="esc">Esc</button>
+          </div>
+          <input id="say" autocomplete="off">
+          <button class="send" id="send">Send</button>
+        </div>
+      </section>
+    </main>
+  </div>
+
+  <script src="https://cdn.jsdelivr.net/npm/xterm@5.3.0/lib/xterm.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/xterm-addon-fit@0.8.0/lib/xterm-addon-fit.js"></script>
+  <script src="/static/md.js"></script>
+  <script src="/static/app.js"></script>
+</body>
+</html>

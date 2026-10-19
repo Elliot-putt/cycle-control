@@ -1,0 +1,9 @@
+{
+  "PP": {
+    "repo": "~/code/street-partner-platform",
+    "github": "AgentSoftware/street-partner-platform",
+    "agent": "spp-builder",
+    "baseBranch": "develop",
+    "worktreePrefix": "spp"
+  }
+}
