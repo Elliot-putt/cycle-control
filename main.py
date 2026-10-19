@@ -19,7 +19,7 @@ EXTRA_PATHS = ["/opt/homebrew/bin", "/usr/local/bin", os.path.expanduser("~/.loc
 
 def serve(app: App, ready: threading.Event) -> None:
     async def run() -> None:
-        runner = web.AppRunner(app.build())
+        runner = web.AppRunner(app.build(), access_log=None)
         await runner.setup()
         await web.TCPSite(runner, "127.0.0.1", app.settings.port).start()
         ready.set()
