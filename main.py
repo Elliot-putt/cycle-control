@@ -41,6 +41,8 @@ def main() -> None:
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(message)s")
     os.environ["PATH"] = ":".join([*os.environ.get("PATH", "").split(":"), *EXTRA_PATHS])
     settings = Settings(demo=args.demo or Settings().demo)
+    if settings.demo:
+        os.environ["CYCLE_NO_NOTIFY"] = "1"
     app = App(settings)
     ready = threading.Event()
     threading.Thread(target=serve, args=(app, ready), daemon=True, name="server").start()

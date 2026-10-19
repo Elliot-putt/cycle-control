@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import subprocess
 import tempfile
 import threading
@@ -532,6 +533,8 @@ class SessionManager:
 
 
 def notify(title: str, message: str) -> None:
+    if os.environ.get("CYCLE_NO_NOTIFY"):
+        return
     safe = message.replace('"', "'")[:200]
     script = f'display notification "{safe}" with title "{title}"'
     try:

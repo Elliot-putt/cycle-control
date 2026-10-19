@@ -43,6 +43,7 @@ from cyclecontrol.sessions import Session, SessionManager, notify
 
 logger = logging.getLogger(__name__)
 
+REQUEUE_RETRY_SECONDS = 300
 REQUEUE_SCRIPT = Path.home() / ".claude" / "spp" / "requeue.sh"
 RESUME_GRACE_SECONDS = 45
 RESUME_GIVE_UP_SECONDS = 600
@@ -166,7 +167,8 @@ class CommentWatcher:
                 and session.health(self._settings.waiting_after_seconds) != "waiting"
             ):
                 continue
-            flag = f"requeue-try:{key}:{state.get('head', '')}"
+            attempt = int(time.time() // REQUEUE_RETRY_SECONDS)
+            flag = f"requeue-try:{key}:{state.get('head', '')}:{attempt}"
             if self._store.notified(flag):
                 continue
             self._store.set_notified(flag, True)
