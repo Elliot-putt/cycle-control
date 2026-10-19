@@ -20,6 +20,7 @@ from cyclecontrol.activity import (
     span,
     write_demo_transcript,
 )
+from cyclecontrol.busy import WATCHER
 from cyclecontrol.config import Settings, TeamConfig
 from cyclecontrol.models import Health, Issue, Mode, Progress
 from cyclecontrol.progress import read_progress
@@ -44,13 +45,15 @@ LANES: dict[Mode, str] = {
 }
 
 
-def health_of(is_alive: bool, phase: str, idle_seconds: float, waiting_after: float) -> Health:
+def health_of(
+    is_alive: bool, phase: str, idle_seconds: float, waiting_after: float, busy: bool = False
+) -> Health:
     """What the dashboard shows as the row's dot."""
     if not is_alive:
         return "done"
     if phase == "human":
         return "waiting"
-    return "waiting" if idle_seconds >= waiting_after else "working"
+    return "waiting" if idle_seconds >= waiting_after and not busy else "working"
 
 
 class UnmappedTeamError(RuntimeError):
@@ -147,11 +150,13 @@ class Session:
         return read_progress(self.git_dir)
 
     def health(self, waiting_after: float) -> Health:
+        idle = time.time() - self.pty.last_output
         return health_of(
             self.pty.is_alive(),
             self.progress().phase,
-            time.time() - self.pty.last_output,
+            idle,
             waiting_after,
+            idle >= waiting_after and WATCHER.running(getattr(self.pty, "pid", 0)),
         )
 
     def summary(self, waiting_after: float) -> dict:
