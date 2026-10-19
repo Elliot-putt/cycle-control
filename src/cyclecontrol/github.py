@@ -98,7 +98,7 @@ PR_FEEDBACK_QUERY = """
 query($owner: String!, $repo: String!, $number: Int!) {
   repository(owner: $owner, name: $repo) {
     pullRequest(number: $number) {
-      number state isDraft headRefName headRefOid reviewDecision author { login }
+      number state mergedAt isDraft headRefName headRefOid reviewDecision author { login }
       labels(first: 30) { nodes { name } }
       commits(last: 1) { nodes { commit { oid statusCheckRollup { state } } } }
       reviewThreads(first: 100) { nodes { id isResolved isOutdated path line

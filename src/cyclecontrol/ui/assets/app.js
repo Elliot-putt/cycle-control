@@ -58,9 +58,13 @@
   const outcomeOf = (s) => s.outcome || s.health;
   const dotClass = (o) => ({ working: "work", waiting: "wait", done: "done", failed: "err" })[o] || "done";
 
+  const isMerged = (s) => !!(s.comments && s.comments.status && s.comments.status.merged);
+
   function strip(s) {
     const at = phaseIndex(s.phase);
-    return PHASES.map((_, i) => `<i class="${i < at ? "d" : i === at ? "c" : ""}"></i>`).join("");
+    const merged = isMerged(s);
+    const bars = PHASES.map((_, i) => `<i class="${merged || i < at ? "d" : i === at ? "c" : ""}"></i>`);
+    return bars.join("") + `<i class="${merged ? "m" : ""}"></i>`;
   }
 
   const ago = (t) => {
@@ -102,7 +106,7 @@
     else if (o === "done") right = "<span>done</span>";
     else if (s.activity) right = `<span class="live">${esc(s.activity)}</span>`;
     return `<div class="agent ${selected === s.id ? "sel" : ""} ${o === "waiting" ? "waiting" : ""}" data-open="${esc(s.id)}">
-      <div class="a-top"><span class="dot ${dotClass(o)}"></span><span class="id">${esc(s.id)}</span><span class="t" title="${esc(s.title)}">${esc(s.title)}</span></div>
+      <div class="a-top"><span class="dot ${isMerged(s) ? "merged" : dotClass(o)}"></span><span class="id">${esc(s.id)}</span><span class="t" title="${esc(s.title)}">${esc(s.title)}</span></div>
       <div class="strip">${strip(s)}</div>
       <div class="a-meta"><b>${esc(label)}</b>${right}</div>
       ${commentChip(s)}
@@ -215,13 +219,14 @@
     $("m-title").title = s.title;
     const pill = $("m-pill");
     const stageNow = s.comments && s.comments.stage;
-    pill.className = `pill ${stageNow ? { need: "wait", work: "work", wait: "work", done: "done" }[stageNow.tone] : dotClass(o)}`;
-    pill.textContent = stageNow ? { need: "Needs you", work: "In progress", wait: "Waiting", done: "Done" }[stageNow.tone] : { working: "Working", waiting: "Needs you", failed: "Failed", done: "Done" }[o];
+    pill.className = `pill ${stageNow && stageNow.tone === "merged" ? "merged" : stageNow ? { need: "wait", work: "work", wait: "work", done: "done" }[stageNow.tone] : dotClass(o)}`;
+    pill.textContent = stageNow ? { need: "Needs you", work: "In progress", wait: "Waiting", done: "Done", merged: "Merged" }[stageNow.tone] : { working: "Working", waiting: "Needs you", failed: "Failed", done: "Done" }[o];
     $("m-linear").href = safeUrl(s.url);
     $("m-pr").hidden = !s.prUrl;
     $("m-pr").href = safeUrl(s.prUrl);
     const at = phaseIndex(s.phase);
-    $("m-steps").innerHTML = PHASES.map(([, label], i) => `<div class="st ${i < at ? "d" : i === at ? "c" : ""} ${i === at && o !== "waiting" ? "work" : ""}"><i></i><span>${label}</span></div>`).join("");
+    const merged = isMerged(s);
+    $("m-steps").innerHTML = PHASES.map(([, label], i) => `<div class="st ${merged || i < at ? "d" : i === at ? "c" : ""} ${!merged && i === at && o !== "waiting" ? "work" : ""}"><i></i><span>${label}</span></div>`).join("") + `<div class="st ${merged ? "m" : ""}"><i></i><span>Merged</span></div>`;
     const c = s.comments || { items: [], needsYou: 0 };
     const showComments = c.items.length || c.lane || c.hasPr;
     const cnt = c.needsYou ? `<span class="cnt">· ${c.needsYou} needs you</span>` : "";
@@ -282,6 +287,11 @@
       const text = q && q.kind === "text" && q.options.length ? raw.split("\n").filter((l) => !/^\s*\d+[.)]\s/.test(l)).join("\n").trim() : raw;
       const opts = (q ? q.options : []).map((o) => `<button class="opt" data-opt="${esc(o.key)}" data-kind="${esc(q.kind)}"><kbd>${esc(o.key)}</kbd>${esc(o.label)}</button>`).join("");
       parts.push(`<div class="ask"><b>${q && q.kind === "plan" ? "Plan approval" : "Waiting on you"}</b><div class="md">${window.renderMarkdown(text)}</div>${opts ? `<div class="opts">${opts}</div>` : ""}</div>`);
+    }
+    if (isMerged(s)) {
+      const at = s.comments.status.mergedAt;
+      const when = at ? new Date(at).toLocaleString([], { day: "numeric", month: "short", hour: "2-digit", minute: "2-digit" }) : "";
+      parts.push(`<div class="ask pr merged"><b>Merged${when ? " · " + esc(when) : ""}</b><p>${rich(s.prUrl)}</p><p class="okline">The PR is on develop. Nothing more to do here.</p></div>`);
     }
     if (!parts.length) parts.push(`<div class="notice">Nothing from the agent yet.</div>`);
     return `<div class="tl">${parts.join("")}</div>`;

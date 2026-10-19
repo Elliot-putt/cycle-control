@@ -291,3 +291,11 @@ def test_review_stage_is_empty_without_a_pr_state():
     from cyclecontrol.comments import review_stage
 
     assert review_stage(None, 0, 0, None) is None
+
+
+def test_a_merged_pr_has_the_merged_lane_and_tone():
+    from cyclecontrol.comments import lane_label, review_stage
+
+    merged = _state(open=False, merged=True, labels=["mergequeue"])
+    assert lane_label(merged, 0, {"status": "requeued"}) == "merged"
+    assert review_stage(merged, 0, 0, None)["tone"] == "merged"

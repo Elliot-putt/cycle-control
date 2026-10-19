@@ -106,6 +106,7 @@ def pr_state(pr: dict[str, Any]) -> dict[str, Any]:
     return {
         "open": pr["state"] == "OPEN",
         "merged": pr["state"] == "MERGED",
+        "mergedAt": pr.get("mergedAt") or "",
         "head": pr.get("headRefOid", ""),
         "draft": bool(pr.get("isDraft")),
         "approved": approval.approved,
@@ -465,6 +466,8 @@ def read_requeue(git_dir: Path) -> dict[str, Any] | None:
 
 def lane_label(state: dict[str, Any] | None, needs_you: int, requeue: dict[str, Any] | None) -> str:
     """The one tag the lane shows for where the PR stands after review."""
+    if (state or {}).get("merged"):
+        return "merged"
     ready = is_ready_to_merge(state, needs_you)
     labels = (state or {}).get("labels", [])
     if (
@@ -499,7 +502,7 @@ def review_stage(
     if not state.get("open", True):
         if state.get("merged"):
             return {
-                "tone": "done",
+                "tone": "merged",
                 "headline": "Merged",
                 "next": "On develop. Nothing more to do on this PR.",
             }
