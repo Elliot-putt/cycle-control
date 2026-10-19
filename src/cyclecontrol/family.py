@@ -41,11 +41,13 @@ class FamilyService:
             return self._plans.get(parent.id, [])
         return read_plan_stack(plan)
 
-    def refresh(self) -> None:
+    def refresh(self, only: str = "") -> None:
         """Look up the PR of every child's branch. Slow, so run it off the request path."""
         if self._settings.demo:
             return
         for parent in self._board.parents():
+            if only and parent.id != only:
+                continue
             team = self._settings.team_for(parent.team)
             if team is None:
                 continue

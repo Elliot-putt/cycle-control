@@ -173,7 +173,7 @@ class App:
             return web.json_response({"error": "Unknown parent."}, status=404)
         body = await request.json()
         mode = "auto" if body.get("mode") == "auto" else "plan"
-        await asyncio.to_thread(self.family.refresh)
+        await asyncio.to_thread(self.family.refresh, parent.id)
         by_id = {c.id: c for c in self.board.children_of(parent.id)}
         failures: list[str] = []
         for state in self.family.resolve(parent):
