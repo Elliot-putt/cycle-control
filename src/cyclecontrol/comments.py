@@ -105,6 +105,7 @@ def pr_state(pr: dict[str, Any]) -> dict[str, Any]:
     ) or ""
     return {
         "open": pr["state"] == "OPEN",
+        "merged": pr["state"] == "MERGED",
         "head": pr.get("headRefOid", ""),
         "draft": bool(pr.get("isDraft")),
         "approved": approval.approved,
@@ -496,7 +497,17 @@ def review_stage(
     blocking = state.get("blocking", [])
     ci = str(state.get("ci") or "unknown").lower()
     if not state.get("open", True):
-        return {"tone": "done", "headline": "Closed or merged", "next": "Nothing more to do."}
+        if state.get("merged"):
+            return {
+                "tone": "done",
+                "headline": "Merged",
+                "next": "On develop. Nothing more to do on this PR.",
+            }
+        return {
+            "tone": "wait",
+            "headline": "Closed without merging",
+            "next": "Reopen it or start again.",
+        }
     if state.get("draft"):
         return {"tone": "wait", "headline": "Draft PR", "next": "Mark it ready for review."}
     if needs_you:

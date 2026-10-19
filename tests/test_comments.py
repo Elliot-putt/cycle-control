@@ -312,12 +312,17 @@ def test_new_feedback_waits_while_the_builder_is_busy_then_is_delivered_once_whe
     assert watcher.tick() == [] and len(session.pty.sent) == 1
 
 
-def test_a_closed_pr_is_forgotten_and_stopped_builders_are_ignored(rig):
+def test_a_merged_pr_is_kept_as_merged_and_not_fetched_again(rig):
     watcher, _, session, fake, _, _ = rig
     watcher.poll()
     fake.raw = pr(state="MERGED")
     watcher.poll()
-    assert watcher._store.peek("o/abc#7") is None and "ABC-12" not in watcher._store.numbers
+    state = watcher._store.state_of("o/abc#7")
+    assert state["open"] is False and state["merged"] is True
+    fetches = fake.fetches
+    watcher.poll()
+    assert fake.fetches == fetches
+    watcher._store.set_state("o/abc#7", {**state, "open": True})
     fake.raw = pr(threads=[thread("T1", [c(1, "sam", "x")])])
     session.stopped = True
     fetches = fake.fetches
@@ -949,3 +954,15 @@ def test_a_state_saved_by_an_older_version_does_not_stop_the_local_step(requeue_
     watcher._store.set_state("o/abc#7", old)
     watcher.tick()
     assert len(calls) == 1, "still attempts the re-queue, keyed on an empty head"
+
+
+def test_a_queued_pr_is_checked_every_minute_and_others_every_five(rig):
+    watcher, _, _, fake, _, _ = rig
+    watcher.poll()
+    fetched = fake.fetches
+    assert watcher.poll(only_due=True) == [] and fake.fetches == fetched
+    state = watcher._store.state_of("o/abc#7")
+    watcher._store.set_state("o/abc#7", {**state, "labels": ["mergequeue"]})
+    watcher._store.pr("o/abc#7")["checked_at"] = watcher._clock() - 61
+    watcher.poll(only_due=True)
+    assert fake.fetches == fetched + 1

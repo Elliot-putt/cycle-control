@@ -277,7 +277,8 @@ def _state(**over):
             "Blocked by Aviator, re-queue refused",
         ),
         (_state(), 0, 0, None, "Approved and ready to merge"),
-        (_state(open=False), 0, 0, None, "Closed or merged"),
+        (_state(open=False, merged=True), 0, 0, None, "Merged"),
+        (_state(open=False), 0, 0, None, "Closed without merging"),
     ],
 )
 def test_review_stage_headline(state, needs, waiting, requeue, headline):

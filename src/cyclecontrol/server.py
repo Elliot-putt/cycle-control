@@ -12,7 +12,7 @@ from aiohttp import WSMsgType, web
 
 from cyclecontrol.board import Board
 from cyclecontrol.comments import CommentStore
-from cyclecontrol.commentwatch import CommentWatcher
+from cyclecontrol.commentwatch import QUEUE_POLL_SECONDS, CommentWatcher
 from cyclecontrol.config import Settings, save_env_value
 from cyclecontrol.family import FamilyService
 from cyclecontrol.github import GithubError, add_label, find_open_pr
@@ -346,7 +346,7 @@ class App:
                 logger.info("Rebase %s for %s onto %s", action.kind, issue_id, action.new_base)
 
         async def comments_step() -> None:
-            woken = await asyncio.to_thread(self.comments.poll)
+            woken = await asyncio.to_thread(self.comments.poll, True)
             if woken:
                 logger.info("New review feedback for: %s", ", ".join(woken))
 
@@ -383,9 +383,7 @@ class App:
         ]
         if self.settings.auto_comments and not self.settings.demo:
             tasks.append(
-                asyncio.create_task(
-                    after_restore("comments", comments_step, self.settings.comment_poll_seconds)
-                )
+                asyncio.create_task(after_restore("comments", comments_step, QUEUE_POLL_SECONDS))
             )
         if self.settings.auto_rebase:
             tasks.append(

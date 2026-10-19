@@ -44,6 +44,7 @@ from cyclecontrol.sessions import Session, SessionManager, notify
 logger = logging.getLogger(__name__)
 
 REQUEUE_RETRY_SECONDS = 300
+QUEUE_POLL_SECONDS = 60
 REQUEUE_SCRIPT = Path.home() / ".claude" / "spp" / "requeue.sh"
 RESUME_GRACE_SECONDS = 45
 RESUME_GIVE_UP_SECONDS = 600
@@ -90,7 +91,17 @@ class CommentWatcher:
             self._store.numbers[session.issue.id] = number
         return team, number
 
-    def poll(self) -> list[str]:
+    def _due(self, key: str) -> bool:
+        state = self._store.state_of(key) or {}
+        seconds = (
+            QUEUE_POLL_SECONDS
+            if "mergequeue" in state.get("labels", [])
+            else self._settings.comment_poll_seconds
+        )
+        checked = (self._store.peek(key) or {}).get("checked_at")
+        return checked is None or self._clock() - checked >= seconds
+
+    def poll(self, only_due: bool = False) -> list[str]:
         """The network step: look at every open builder PR. Returns the builders with something new."""
         woken: list[str] = []
         for session in list(self._sessions.all()):
@@ -100,16 +111,19 @@ class CommentWatcher:
             if located is None:
                 continue
             team, number = located
+            key = self.pr_key(team, number)
+            stored = self._store.state_of(key) or {}
+            if stored.get("open") is False or (only_due and not self._due(key)):
+                continue
             try:
                 raw = self._fetch(team.github_repo, number)
             except GithubError:
                 logger.warning("Could not read PR %s#%s", team.github_repo, number)
                 continue
             facts, items = parse_pr(raw)
-            key = self.pr_key(team, number)
             if facts.state != "OPEN":
-                self._store.drop(key)
-                self._store.numbers.pop(session.issue.id, None)
+                self._store.set_state(key, pr_state(raw))
+                self._store.pr(key).update({"checked_at": self._clock(), "last_new": 0})
                 continue
             self._store.set_state(key, pr_state(raw))
             fresh = self._store.record(key, items, self._clock())
