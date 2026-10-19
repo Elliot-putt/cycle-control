@@ -95,7 +95,8 @@
     const o = outcomeOf(s);
     const label = (PHASES[phaseIndex(s.phase)] || [s.phase, s.phase === "starting" ? "starting" : s.phase])[1];
     let right = "";
-    if (s.approved) right = "<span>queued by you</span>";
+    if (s.comments && s.comments.stage) right = `<span class="${s.comments.stage.tone === "need" ? "needs" : ""}">${esc(s.comments.stage.headline.slice(0, 34))}</span>`;
+    else if (s.approved) right = "<span>you added mergequeue</span>";
     else if (o === "waiting") right = '<span class="needs">needs you</span>';
     else if (o === "failed") right = "<span>failed</span>";
     else if (o === "done") right = "<span>done</span>";
@@ -213,9 +214,9 @@
     $("m-title").textContent = s.title;
     $("m-title").title = s.title;
     const pill = $("m-pill");
-    pill.className = `pill ${dotClass(o)}`;
-    pill.className = `pill ${s.approved ? "done" : dotClass(o)}`;
-    pill.textContent = s.approved ? "Queued by you" : { working: "Working", waiting: "Needs you", failed: "Failed", done: "Done" }[o];
+    const stageNow = s.comments && s.comments.stage;
+    pill.className = `pill ${stageNow ? { need: "wait", work: "work", wait: "work", done: "done" }[stageNow.tone] : dotClass(o)}`;
+    pill.textContent = stageNow ? { need: "Needs you", work: "In progress", wait: "Waiting", done: "Done" }[stageNow.tone] : { working: "Working", waiting: "Needs you", failed: "Failed", done: "Done" }[o];
     $("m-linear").href = safeUrl(s.url);
     $("m-pr").hidden = !s.prUrl;
     $("m-pr").href = safeUrl(s.prUrl);
@@ -227,16 +228,19 @@
     const tabs = [["activity", "Activity", ""], ...(showComments ? [["comments", `Comments${c.items.length ? " · " + c.items.length : ""}`, cnt]] : []), ["terminal", "Terminal", ""]];
     $("tabs").innerHTML = tabs.map(([key, label, cnt]) => `<button data-tab="${key}" class="${tab === key ? "on" : ""}">${label}${cnt}</button>`).join("");
     const banner = $("m-banner");
-    const cm = s.comments;
-    const plural = (n) => (n === 1 ? "" : "s");
-    if (cm && tab !== "comments" && cm.needsYou) {
-      banner.className = "banner need";
-      banner.innerHTML = `<span class="pulse"></span><b>${cm.needsYou} review comment${plural(cm.needsYou)} need${cm.needsYou === 1 ? "s" : ""} you</b><span class="muted">${cm.addressed} addressed</span><button class="ghost" data-comments="${esc(s.id)}">Open comments</button>`;
-      banner.hidden = false;
-    } else if (cm && tab !== "comments" && cm.waiting) {
-      const who = (cm.authors || []).map((a) => "@" + a).join(", ");
-      banner.className = "banner work";
-      banner.innerHTML = `<span class="pulse"></span><b>Picking up ${cm.waiting} review comment${plural(cm.waiting)}${who ? " from " + esc(who) : ""}</b><span class="muted">${cm.addressed} addressed so far</span><button class="ghost" data-comments="${esc(s.id)}">Open comments</button>`;
+    const stage = s.comments && s.comments.stage;
+    if (stage) {
+      const st = s.comments.status || {};
+      const facts = [
+        st.approved ? `approved by ${(st.approvers || []).map((a) => "@" + a).join(", ")}` : "not approved",
+        `${st.unresolved || 0} open thread${st.unresolved === 1 ? "" : "s"}`,
+        `CI ${String(st.ci || "unknown").toLowerCase()}`,
+        (st.labels || []).length ? `labels: ${st.labels.join(", ")}` : "no labels",
+      ].join(" · ");
+      const pulse = stage.tone === "work" || stage.tone === "need" ? '<span class="pulse"></span>' : "";
+      const button = tab !== "comments" && s.comments.items.length ? `<button class="ghost" data-comments="${esc(s.id)}">Open comments</button>` : "";
+      banner.className = `banner stage ${stage.tone}`;
+      banner.innerHTML = `<div class="stage-main">${pulse}<b>${esc(stage.headline)}</b><span class="muted">${esc(stage.next)}</span></div><div class="stage-facts">${esc(facts)}</div>${button}`;
       banner.hidden = false;
     } else {
       banner.hidden = true;
@@ -272,7 +276,7 @@
       const done = s.approved
         ? `<p class="okline">You added mergequeue${s.slackLink ? ` and posted in Slack: <a href="${esc(safeUrl(s.slackLink))}" target="_blank" rel="noopener">message</a>` : ""}.</p>`
         : `<div class="actions"><button class="ghost" data-changes="${esc(s.id)}">Request changes</button><button class="send" data-approve="${esc(s.id)}" ${busy ? "disabled" : ""}>${busy ? "Approving…" : confirming === s.id ? "Confirm approve" : "Approve"}</button></div>`;
-      parts.push(`<div class="ask pr ${s.approved ? "approved" : ""}"><b>${s.approved ? "Queued by you" : "PR ready for you"}</b><p>${rich(s.prUrl)}</p>${done}</div>`);
+      parts.push(`<div class="ask pr ${s.approved ? "approved" : ""}"><b>${s.approved ? "Added to the merge queue by you" : "PR ready for you"}</b><p>${rich(s.prUrl)}</p>${done}</div>`);
     } else if (q || waiting) {
       const raw = q ? q.text : s.latest || "The agent is idle and waiting for your input.";
       const text = q && q.kind === "text" && q.options.length ? raw.split("\n").filter((l) => !/^\s*\d+[.)]\s/.test(l)).join("\n").trim() : raw;

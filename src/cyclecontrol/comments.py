@@ -482,6 +482,87 @@ def lane_label(state: dict[str, Any] | None, needs_you: int, requeue: dict[str, 
     return ""
 
 
+def review_stage(
+    state: dict[str, Any] | None,
+    needs_you: int,
+    waiting: int,
+    requeue: dict[str, Any] | None,
+) -> dict[str, Any] | None:
+    """What the PR is doing after review, in one headline and one next step."""
+    if not state:
+        return None
+    labels = state.get("labels", [])
+    unresolved = state.get("unresolved", 0)
+    blocking = state.get("blocking", [])
+    ci = str(state.get("ci") or "unknown").lower()
+    if not state.get("open", True):
+        return {"tone": "done", "headline": "Closed or merged", "next": "Nothing more to do."}
+    if state.get("draft"):
+        return {"tone": "wait", "headline": "Draft PR", "next": "Mark it ready for review."}
+    if needs_you:
+        return {
+            "tone": "need",
+            "headline": f"{needs_you} review comment{'s need' if needs_you != 1 else ' needs'} your decision",
+            "next": "Open the Comments tab and answer or post the drafted reply.",
+        }
+    if waiting:
+        return {
+            "tone": "work",
+            "headline": f"Builder is working through {waiting} review comment{'s' if waiting != 1 else ''}",
+            "next": "It fixes, replies and resolves each thread. Nothing for you to do.",
+        }
+    if blocking:
+        who = ", ".join("@" + b for b in blocking)
+        return {
+            "tone": "need",
+            "headline": f"Changes requested by {who}",
+            "next": "The builder picks the comments up on the next check.",
+        }
+    if unresolved:
+        return {
+            "tone": "wait",
+            "headline": f"{unresolved} thread{'s' if unresolved != 1 else ''} still open",
+            "next": "Waiting for the threads to be resolved.",
+        }
+    if ci != "success":
+        return {
+            "tone": "work" if ci in ("pending", "expected", "unknown") else "need",
+            "headline": f"CI is {ci}",
+            "next": "Waiting for the checks to finish.",
+        }
+    if not state.get("approved"):
+        return {
+            "tone": "wait",
+            "headline": "Waiting for a reviewer's approval",
+            "next": "Nothing for you or the builder until someone reviews.",
+        }
+    queued = "mergequeue" in labels
+    if queued and "blocked" not in labels:
+        return {
+            "tone": "done",
+            "headline": "In the merge queue",
+            "next": "Aviator merges it when its turn comes. Nothing for you to do.",
+        }
+    if "blocked" in labels:
+        if requeue and requeue.get("status") == "refused":
+            why = "; ".join(requeue.get("reasons") or []) or "a check failed"
+            return {
+                "tone": "need",
+                "headline": "Blocked by Aviator, re-queue refused",
+                "next": f"Not re-queued: {why}.",
+            }
+        return {
+            "tone": "work",
+            "headline": "Blocked by Aviator, approved and clean",
+            "next": "The app re-queues it within 5 minutes if you added mergequeue; otherwise add it yourself.",
+        }
+    return {
+        "tone": "need",
+        "headline": "Approved and ready to merge",
+        "next": "Press Add to merge queue.",
+    }
+
+
 def comments_view(
     store_pr: dict[str, Any] | None,
     actions: dict[str, dict[str, str]],
@@ -497,6 +578,7 @@ def comments_view(
             "lane": "",
             "authors": [],
             "status": None,
+            "stage": None,
             "requeue": requeue,
         }
     rows: list[dict[str, Any]] = []
@@ -536,6 +618,12 @@ def comments_view(
         "authors": authors,
         "lane": lane_label(state, needs_you, requeue),
         "status": state,
+        "stage": review_stage(
+            state,
+            needs_you,
+            sum(1 for r in relevant if r["state"] in ("queued", "delivered")),
+            requeue,
+        ),
         "requeue": requeue,
         "addressed": sum(
             1 for r in relevant if r["state"] in ("fixed", "replied", "skipped", "posted")

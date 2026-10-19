@@ -242,3 +242,51 @@ def test_a_blocked_pr_that_is_otherwise_ready_is_a_requeue_candidate():
     assert is_requeue_candidate(pr_state(full_pr(state="CLOSED", **blocked))) is False
     assert is_requeue_candidate(None) is False
     assert pr_state(full_pr(headRefOid="abc"))["head"] == "abc"
+
+
+def _state(**over):
+    base = {
+        "open": True,
+        "draft": False,
+        "approved": True,
+        "approvers": ["rio"],
+        "blocking": [],
+        "ci": "SUCCESS",
+        "unresolved": 0,
+        "labels": [],
+    }
+    return {**base, **over}
+
+
+@pytest.mark.parametrize(
+    ("state", "needs", "waiting", "requeue", "headline"),
+    [
+        (_state(), 1, 0, None, "1 review comment needs your decision"),
+        (_state(), 0, 2, None, "Builder is working through 2 review comments"),
+        (_state(approved=False, blocking=["rio"]), 0, 0, None, "Changes requested by @rio"),
+        (_state(unresolved=2), 0, 0, None, "2 threads still open"),
+        (_state(ci="PENDING"), 0, 0, None, "CI is pending"),
+        (_state(approved=False), 0, 0, None, "Waiting for a reviewer's approval"),
+        (_state(labels=["mergequeue"]), 0, 0, None, "In the merge queue"),
+        (_state(labels=["blocked"]), 0, 0, None, "Blocked by Aviator, approved and clean"),
+        (
+            _state(labels=["blocked"]),
+            0,
+            0,
+            {"status": "refused", "reasons": ["CI is failure"]},
+            "Blocked by Aviator, re-queue refused",
+        ),
+        (_state(), 0, 0, None, "Approved and ready to merge"),
+        (_state(open=False), 0, 0, None, "Closed or merged"),
+    ],
+)
+def test_review_stage_headline(state, needs, waiting, requeue, headline):
+    from cyclecontrol.comments import review_stage
+
+    assert review_stage(state, needs, waiting, requeue)["headline"] == headline
+
+
+def test_review_stage_is_empty_without_a_pr_state():
+    from cyclecontrol.comments import review_stage
+
+    assert review_stage(None, 0, 0, None) is None
