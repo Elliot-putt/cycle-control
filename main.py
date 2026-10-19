@@ -58,7 +58,11 @@ def main() -> None:
 
     webview.create_window("Cycle Control", url, width=1500, height=950, background_color="#0b0d12")
     webview.start()
-    app.sessions.stop_all()
+    try:
+        app.sessions.stop_all()
+    finally:
+        logging.shutdown()
+        os._exit(0)
 
 
 if __name__ == "__main__":
