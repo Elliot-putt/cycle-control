@@ -240,7 +240,7 @@
       const pulse = stage.tone === "work" || stage.tone === "need" ? '<span class="pulse"></span>' : "";
       const button = tab !== "comments" && s.comments.items.length ? `<button class="ghost" data-comments="${esc(s.id)}">Open comments</button>` : "";
       banner.className = `banner stage ${stage.tone}`;
-      banner.innerHTML = `<div class="stage-main">${pulse}<b>${esc(stage.headline)}</b><span class="muted">${esc(stage.next)}</span></div><div class="stage-facts">${esc(facts)}</div>${button}`;
+      banner.innerHTML = `<div class="stage-main">${pulse}<b>${esc(stage.headline)}</b><span class="muted">${esc(stage.next)}</span>${button}</div><div class="stage-facts">${esc(facts)}</div>`;
       banner.hidden = false;
     } else {
       banner.hidden = true;
