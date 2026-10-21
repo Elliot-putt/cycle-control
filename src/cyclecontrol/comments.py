@@ -177,6 +177,10 @@ def _skip_bot(node: dict[str, Any]) -> bool:
     return (node.get("author") or {}).get("__typename") == "Bot" or is_other_bot(login)
 
 
+def resolved_thread_ids(pr: dict[str, Any]) -> list[str]:
+    return [t["id"] for t in pr["reviewThreads"]["nodes"] if t.get("isResolved") and t.get("id")]
+
+
 def parse_pr(pr: dict[str, Any]) -> tuple[PrFacts, list[ReviewItem]]:
     """The actionable items of a PR: unresolved threads awaiting an answer, comments and review bodies."""
     author = (pr.get("author") or {}).get("login", "")
@@ -626,6 +630,10 @@ def comments_view(
                 "reply": clean_draft(reply),
                 "postedUrl": (decision or {}).get("posted_url", ""),
                 "resolved": bool((decision or {}).get("resolved")),
+                "githubResolved": bool(
+                    item.get("thread_id")
+                    and item["thread_id"] in store_pr.get("resolved_threads", [])
+                ),
             }
         )
     relevant = [r for r in rows if r["state"] != "seen"]

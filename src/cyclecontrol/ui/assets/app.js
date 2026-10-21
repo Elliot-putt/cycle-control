@@ -314,7 +314,8 @@
       const place = it.path ? `${esc(it.path)}${it.line ? ":" + it.line : ""}` : "";
       const where = place ? ` · ${it.url ? `<a href="${esc(safeUrl(it.url))}" target="_blank" rel="noopener">${place}</a>` : place}` : "";
       const link = it.url ? `<a class="gh" href="${esc(safeUrl(it.url))}" target="_blank" rel="noopener">GitHub ↗</a>` : "";
-      const label = it.state === "posted" && it.resolved ? "reply posted · resolved" : STATE_TEXT[it.state] || it.state;
+      const base = it.state === "posted" && it.resolved ? "reply posted · resolved" : STATE_TEXT[it.state] || it.state;
+      const label = it.githubResolved && it.state !== "needs_you" ? `${base} · resolved on GitHub` : base;
       const head = `<div class="c-head"><b>@${esc(it.author)}</b><span class="mono muted">${esc(it.kind)}${where}</span>${link}<span class="tag k-${esc(it.state)}">${esc(label)}</span></div>`;
       const body = `<details class="c-body"><summary>${esc(String(it.body).split("\n")[0].slice(0, 110))}</summary><div class="md">${window.renderMarkdown(it.body)}</div></details>`;
       if (it.state === "needs_you") {

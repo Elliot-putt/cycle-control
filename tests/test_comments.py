@@ -982,3 +982,16 @@ def test_hidden_html_comments_are_not_shown_in_a_review_body():
 
     assert visible("<!-- coderabbit-ai-generated:v1 -->\nUse a constant.") == "Use a constant."
     assert visible("a <!-- x\ny --> b") == "a  b"
+
+
+def test_a_thread_resolved_on_github_is_marked_on_its_card(rig):
+    watcher, _, _, fake, _, _ = rig
+    raw = pr(threads=[thread("T1", [c(1, "sam", "Rename this")])])
+    fake.raw = raw
+    watcher.poll()
+    card = comments_view(watcher._store.peek("o/abc#7"), {})["items"][0]
+    assert card["githubResolved"] is False
+    raw["reviewThreads"]["nodes"][0]["isResolved"] = True
+    watcher.poll()
+    card = comments_view(watcher._store.peek("o/abc#7"), {})["items"][0]
+    assert card["githubResolved"] is True

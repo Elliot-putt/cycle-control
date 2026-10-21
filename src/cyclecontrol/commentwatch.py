@@ -28,6 +28,7 @@ from cyclecontrol.comments import (
     pr_state,
     read_actions,
     read_requeue,
+    resolved_thread_ids,
 )
 from cyclecontrol.config import Settings, TeamConfig
 from cyclecontrol.github import (
@@ -133,6 +134,7 @@ class CommentWatcher:
                 self._store.pr(key).update({"checked_at": self._clock(), "last_new": 0})
                 continue
             self._store.set_state(key, pr_state(raw))
+            self._store.pr(key)["resolved_threads"] = resolved_thread_ids(raw)
             fresh = self._store.record(key, items, self._clock())
             self._store.pr(key).update({"checked_at": self._clock(), "last_new": len(fresh)})
             if fresh:
