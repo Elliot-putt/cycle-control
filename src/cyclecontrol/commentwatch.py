@@ -18,6 +18,7 @@ from cyclecontrol.comments import (
     CommentStore,
     PrFacts,
     ReviewItem,
+    ci_item,
     clean_draft,
     comments_view,
     feedback_text,
@@ -133,8 +134,17 @@ class CommentWatcher:
                 self._store.set_state(key, pr_state(raw))
                 self._store.pr(key).update({"checked_at": self._clock(), "last_new": 0})
                 continue
-            self._store.set_state(key, pr_state(raw))
+            state = pr_state(raw)
+            self._store.set_state(key, state)
             self._store.pr(key)["resolved_threads"] = resolved_thread_ids(raw)
+            failed = (
+                ci_item(state, f"https://github.com/{team.github_repo}", number)
+                if session.progress().phase == "human"
+                else None
+            )
+            self._store.discard_stale_ci(key, failed.key if failed else "")
+            if failed:
+                items.append(failed)
             fresh = self._store.record(key, items, self._clock())
             self._store.pr(key).update({"checked_at": self._clock(), "last_new": len(fresh)})
             if fresh:

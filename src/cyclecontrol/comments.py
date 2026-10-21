@@ -107,23 +107,29 @@ FAILED = ("FAILURE", "ERROR", "TIMED_OUT", "CANCELLED", "ACTION_REQUIRED", "STAR
 PASSED = ("SUCCESS", "NEUTRAL", "SKIPPED")
 
 
-def effective_ci(rollup: dict[str, Any] | None) -> str:
-    """CI from the checks that are really CI. The merge bot and CodeRabbit sit pending on their own schedule."""
-    if not rollup:
-        return ""
-    nodes = (rollup.get("contexts") or {}).get("nodes") or []
-    if not nodes:
-        return rollup.get("state") or ""
-    verdicts: list[str] = []
+def real_checks(rollup: dict[str, Any] | None) -> list[tuple[str, str]]:
+    """(name, verdict) of the checks that are really CI, in the order GitHub lists them."""
+    nodes = ((rollup or {}).get("contexts") or {}).get("nodes") or []
+    checks: list[tuple[str, str]] = []
     for node in nodes:
-        name = (node.get("name") or node.get("context") or "").lower()
-        if any(skip in name for skip in NOT_CI):
+        name = node.get("name") or node.get("context") or ""
+        if any(skip in name.lower() for skip in NOT_CI):
             continue
         if node.get("__typename") == "CheckRun":
             result = node.get("conclusion") if node.get("status") == "COMPLETED" else "PENDING"
         else:
             result = node.get("state")
-        verdicts.append(result or "PENDING")
+        checks.append((name, result or "PENDING"))
+    return checks
+
+
+def effective_ci(rollup: dict[str, Any] | None) -> str:
+    """CI from the checks that are really CI. The merge bot and CodeRabbit sit pending on their own schedule."""
+    if not rollup:
+        return ""
+    if not ((rollup.get("contexts") or {}).get("nodes") or []):
+        return rollup.get("state") or ""
+    verdicts = [verdict for _, verdict in real_checks(rollup)]
     if any(v in FAILED for v in verdicts):
         return "FAILURE"
     if any(v not in PASSED for v in verdicts):
@@ -135,7 +141,8 @@ def pr_state(pr: dict[str, Any]) -> dict[str, Any]:
     """What the lane needs to know about a PR: approval, CI, unresolved threads and labels."""
     approval = review_status(pr)
     commits = (pr.get("commits") or {}).get("nodes") or []
-    rollup = effective_ci((commits[-1]["commit"].get("statusCheckRollup")) if commits else None)
+    checks = commits[-1]["commit"].get("statusCheckRollup") if commits else None
+    rollup = effective_ci(checks)
     return {
         "open": pr["state"] == "OPEN",
         "merged": pr["state"] == "MERGED",
@@ -146,6 +153,7 @@ def pr_state(pr: dict[str, Any]) -> dict[str, Any]:
         "approvers": list(approval.approvers),
         "blocking": list(approval.blocking),
         "ci": rollup,
+        "failing": [n for n, v in real_checks(checks) if v in FAILED],
         "unresolved": sum(1 for t in pr["reviewThreads"]["nodes"] if not t["isResolved"]),
         "labels": [n["name"] for n in (pr.get("labels") or {}).get("nodes", [])],
     }
@@ -206,6 +214,32 @@ def _skip_bot(node: dict[str, Any]) -> bool:
 
 def resolved_thread_ids(pr: dict[str, Any]) -> list[str]:
     return [t["id"] for t in pr["reviewThreads"]["nodes"] if t.get("isResolved") and t.get("id")]
+
+
+def ci_item(state: dict[str, Any], repo_url: str, number: int) -> ReviewItem | None:
+    """A failed CI run on a PR whose builder has already handed over."""
+    failing = state.get("failing") or []
+    head = state.get("head", "")
+    if not failing or not head or not state.get("open") or state.get("draft"):
+        return None
+    body = (
+        f"CI is failing on {head[:8]}: {', '.join(failing)}.\n"
+        "Aviator merges develop into the branch after mergequeue, so this can be new develop code that clashes with this PR.\n"
+        "Check the current state first: if CI is already green, record it as skipped. "
+        "Otherwise read each failing job's log yourself (the circleci MCP get_build_failure_logs, or gh pr checks), fix it on your branch, "
+        "run the fast gates, push with --force-with-lease, then run ~/.claude/spp/requeue.sh if the PR is blocked.\n"
+        f'Record it with `~/.claude/spp/comment.sh ci:{head[:8]} fixed "<what broke and the fix>"`. It posts nothing to GitHub.'
+    )
+    return ReviewItem(
+        key=f"ci:{head[:8]}",
+        kind="ci",
+        author="CI",
+        is_owner=False,
+        is_coderabbit=False,
+        body=body,
+        url=f"{repo_url}/pull/{number}",
+        created_at="",
+    )
 
 
 def parse_pr(pr: dict[str, Any]) -> tuple[PrFacts, list[ReviewItem]]:
@@ -353,6 +387,9 @@ def feedback_text(
             else ("CodeRabbit" if item.is_coderabbit else "reviewer")
         )
         where = f" {item.path}:{item.line}" if item.path else ""
+        if item.kind == "ci":
+            lines += [f"## {n}. id `{item.key}` · ci", *item.body.strip().splitlines(), ""]
+            continue
         lines += [f"## {n}. id `{item.key}` · {item.kind} · @{item.author} · {who}{where}"]
         if item.thread_id:
             lines.append(f"Thread node id `{item.thread_id}`. Reply to comment `{item.reply_to}`.")
@@ -407,7 +444,7 @@ class CommentStore:
             if known:
                 continue
             seen.add(item.key)
-            if first and item.kind != "thread":
+            if first and item.kind not in ("thread", "ci"):
                 continue
             fresh.append(item)
         state["baselined"] = True
@@ -417,6 +454,14 @@ class CommentStore:
             for stale in list(state["items"])[: len(state["items"]) - MAX_ITEMS]:
                 state["items"].pop(stale)
         return fresh
+
+    def discard_stale_ci(self, key: str, current: str) -> None:
+        """A CI failure that no longer matches the PR head is not worth a builder's time."""
+        state = self.pr(key)
+        stale = [k for k in state["items"] if k.startswith("ci:") and k != current]
+        for k in stale:
+            state["items"].pop(k)
+        state["pending"] = [k for k in state["pending"] if k not in stale]
 
     def pending_items(self, key: str) -> list[ReviewItem]:
         state = self.pr(key)

@@ -326,3 +326,33 @@ def test_ci_ignores_the_merge_bot_and_coderabbit_but_not_real_checks():
     failing = [run("lint", conclusion="FAILURE")]
     assert effective_ci({"state": "FAILURE", "contexts": {"nodes": failing}}) == "FAILURE"
     assert effective_ci(None) == ""
+
+
+def _failing(**over):
+    return _state(ci="FAILURE", failing=["ci/circleci: test-jest"], head="aef6849f0000", **over)
+
+
+def test_a_failing_ci_on_an_open_pr_becomes_an_item_for_the_builder():
+    from cyclecontrol.comments import PrFacts, ci_item, feedback_text
+
+    item = ci_item(_failing(), "https://github.com/o/r", 7)
+    assert item.key == "ci:aef6849f" and "test-jest" in item.body
+    text = feedback_text("o/r", PrFacts(7, "OPEN", "me", "feature/x", ""), [item])
+    assert "ci:aef6849f" in text and "get_build_failure_logs" in text
+
+
+@pytest.mark.parametrize("over", [{"open": False}, {"draft": True}, {"failing": []}])
+def test_no_ci_item_when_closed_draft_or_nothing_failed(over):
+    from cyclecontrol.comments import ci_item
+
+    assert ci_item({**_failing(), **over}, "https://github.com/o/r", 7) is None
+
+
+def test_a_ci_item_for_an_old_head_is_discarded(tmp_path):
+    from cyclecontrol.comments import CommentStore, ci_item
+
+    store = CommentStore(tmp_path / "c.json")
+    old = ci_item(_failing(), "https://github.com/o/r", 7)
+    assert store.record("k", [old]) == [old]
+    store.discard_stale_ci("k", "ci:other")
+    assert store.pr("k")["items"] == {} and store.pending_items("k") == []
