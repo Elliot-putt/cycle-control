@@ -265,8 +265,16 @@ def _state(**over):
         (_state(), 0, 2, None, "Builder is working through 2 review comments"),
         (_state(approved=False, blocking=["rio"]), 0, 0, None, "Changes requested by @rio"),
         (_state(unresolved=2), 0, 0, None, "2 threads still open"),
-        (_state(ci="PENDING"), 0, 0, None, "CI is pending"),
-        (_state(approved=False), 0, 0, None, "Waiting for a reviewer's approval"),
+        (_state(ci="PENDING"), 0, 0, None, "CI is running"),
+        (_state(ci="FAILURE"), 0, 0, None, "CI is failing"),
+        (_state(approved=False), 0, 0, None, "Ready for your review"),
+        (
+            _state(approved=False, labels=["mergequeue"]),
+            0,
+            0,
+            None,
+            "Queued, waiting for a reviewer's approval",
+        ),
         (_state(labels=["mergequeue"]), 0, 0, None, "In the merge queue"),
         (_state(labels=["blocked"]), 0, 0, None, "Blocked by Aviator, approved and clean"),
         (
@@ -299,3 +307,22 @@ def test_a_merged_pr_has_the_merged_lane_and_tone():
     merged = _state(open=False, merged=True, labels=["mergequeue"])
     assert lane_label(merged, 0, {"status": "requeued"}) == "merged"
     assert review_stage(merged, 0, 0, None)["tone"] == "merged"
+
+
+def test_ci_ignores_the_merge_bot_and_coderabbit_but_not_real_checks():
+    from cyclecontrol.comments import effective_ci
+
+    def run(name, status="COMPLETED", conclusion="SUCCESS"):
+        return {"__typename": "CheckRun", "name": name, "status": status, "conclusion": conclusion}
+
+    def status(context, state):
+        return {"__typename": "StatusContext", "context": context, "state": state}
+
+    green = [run("ci/circleci: lint"), status("ci/circleci: test", "SUCCESS")]
+    bots = [status("aviator/checks", "PENDING"), status("CodeRabbit", "PENDING")]
+    assert effective_ci({"state": "PENDING", "contexts": {"nodes": green + bots}}) == "SUCCESS"
+    pending = [run("lint", status="IN_PROGRESS", conclusion=None)]
+    assert effective_ci({"state": "PENDING", "contexts": {"nodes": pending + bots}}) == "PENDING"
+    failing = [run("lint", conclusion="FAILURE")]
+    assert effective_ci({"state": "FAILURE", "contexts": {"nodes": failing}}) == "FAILURE"
+    assert effective_ci(None) == ""

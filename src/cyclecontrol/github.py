@@ -100,7 +100,11 @@ query($owner: String!, $repo: String!, $number: Int!) {
     pullRequest(number: $number) {
       number state mergedAt isDraft headRefName headRefOid reviewDecision author { login }
       labels(first: 30) { nodes { name } }
-      commits(last: 1) { nodes { commit { oid statusCheckRollup { state } } } }
+      commits(last: 1) { nodes { commit { oid statusCheckRollup { state contexts(first: 100) { nodes {
+        __typename
+        ... on CheckRun { name status conclusion }
+        ... on StatusContext { context state }
+      } } } } } }
       reviewThreads(first: 100) { nodes { id isResolved isOutdated path line
         comments(first: 30) { nodes { databaseId author { login __typename } body url createdAt } } } }
       comments(last: 50) { nodes { databaseId author { login __typename } body url createdAt } }

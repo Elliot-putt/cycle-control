@@ -102,13 +102,40 @@ def review_status(pr: dict[str, Any]) -> Approval:
     return Approval(bool(approvers) and not blocking, approvers, blocking)
 
 
+NOT_CI = ("aviator", "coderabbit", "auto-merge")
+FAILED = ("FAILURE", "ERROR", "TIMED_OUT", "CANCELLED", "ACTION_REQUIRED", "STARTUP_FAILURE")
+PASSED = ("SUCCESS", "NEUTRAL", "SKIPPED")
+
+
+def effective_ci(rollup: dict[str, Any] | None) -> str:
+    """CI from the checks that are really CI. The merge bot and CodeRabbit sit pending on their own schedule."""
+    if not rollup:
+        return ""
+    nodes = (rollup.get("contexts") or {}).get("nodes") or []
+    if not nodes:
+        return rollup.get("state") or ""
+    verdicts: list[str] = []
+    for node in nodes:
+        name = (node.get("name") or node.get("context") or "").lower()
+        if any(skip in name for skip in NOT_CI):
+            continue
+        if node.get("__typename") == "CheckRun":
+            result = node.get("conclusion") if node.get("status") == "COMPLETED" else "PENDING"
+        else:
+            result = node.get("state")
+        verdicts.append(result or "PENDING")
+    if any(v in FAILED for v in verdicts):
+        return "FAILURE"
+    if any(v not in PASSED for v in verdicts):
+        return "PENDING"
+    return "SUCCESS" if verdicts else ""
+
+
 def pr_state(pr: dict[str, Any]) -> dict[str, Any]:
     """What the lane needs to know about a PR: approval, CI, unresolved threads and labels."""
     approval = review_status(pr)
     commits = (pr.get("commits") or {}).get("nodes") or []
-    rollup = ((commits[-1]["commit"].get("statusCheckRollup") or {}) if commits else {}).get(
-        "state"
-    ) or ""
+    rollup = effective_ci((commits[-1]["commit"].get("statusCheckRollup")) if commits else None)
     return {
         "open": pr["state"] == "OPEN",
         "merged": pr["state"] == "MERGED",
@@ -548,19 +575,31 @@ def review_stage(
             "headline": f"{unresolved} thread{'s' if unresolved != 1 else ''} still open",
             "next": "Waiting for the threads to be resolved.",
         }
-    if ci != "success":
+    if ci == "failure":
         return {
-            "tone": "work" if ci in ("pending", "expected", "unknown") else "need",
-            "headline": f"CI is {ci}",
-            "next": "Waiting for the checks to finish.",
+            "tone": "need",
+            "headline": "CI is failing",
+            "next": "The builder looks at the failing checks.",
         }
-    if not state.get("approved"):
+    if ci in ("pending", "expected"):
         return {
-            "tone": "wait",
-            "headline": "Waiting for a reviewer's approval",
-            "next": "Nothing for you or the builder until someone reviews.",
+            "tone": "work",
+            "headline": "CI is running",
+            "next": "Waiting for the checks to finish. You can review meanwhile.",
         }
     queued = "mergequeue" in labels
+    if not state.get("approved"):
+        if queued:
+            return {
+                "tone": "wait",
+                "headline": "Queued, waiting for a reviewer's approval",
+                "next": "Out for review. Aviator merges it once it is approved and green.",
+            }
+        return {
+            "tone": "need",
+            "headline": "Ready for your review",
+            "next": "Approve to add it to the merge queue, or request changes.",
+        }
     if queued and "blocked" not in labels:
         return {
             "tone": "done",
