@@ -20,6 +20,7 @@ OTHER_BOTS = {
     "copilot-pull-request-reviewer",
     "codecov",
 }
+HTML_COMMENT = re.compile(r"<!--.*?-->", re.DOTALL)
 WALKTHROUGH_HINTS = ("auto-generated comment: summarize by coderabbit.ai", "walkthrough")
 REVIEW_BODY_SECTIONS = ("nitpick comments", "outside diff range", "duplicate comments")
 MAX_SEEN = 600
@@ -35,6 +36,11 @@ DRAFT_PREFIX = re.compile(
 def clean_draft(text: str) -> str:
     """A drafted reply as it should read when posted: no "Draft reply (not posted):" label and no marker."""
     return DRAFT_PREFIX.sub("", text.replace(MARKER, ""), count=1).strip()
+
+
+def visible(text: str) -> str:
+    """The body without hidden HTML comments such as CodeRabbit's generated-by marker."""
+    return HTML_COMMENT.sub("", text).strip()
 
 
 def is_coderabbit(login: str) -> bool:
@@ -187,7 +193,7 @@ def parse_pr(pr: dict[str, Any]) -> tuple[PrFacts, list[ReviewItem]]:
         if _skip_bot(last):
             continue
         conversation = "\n".join(
-            f"{'builder' if MARKER in c['body'] else '@' + _login(c)}: {c['body'].replace(MARKER, '').strip()}"
+            f"{'builder' if MARKER in c['body'] else '@' + _login(c)}: {visible(c['body'].replace(MARKER, ''))}"
             for c in comments
         )
         items.append(
@@ -220,7 +226,7 @@ def parse_pr(pr: dict[str, Any]) -> tuple[PrFacts, list[ReviewItem]]:
                 login,
                 login == author,
                 is_coderabbit(login),
-                body,
+                visible(body),
                 url=comment.get("url", ""),
                 created_at=comment.get("createdAt", ""),
             )

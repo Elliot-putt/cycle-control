@@ -975,3 +975,10 @@ def test_the_default_lookup_finds_a_merged_pr(monkeypatch):
     merged = PrState(7, "https://x/pull/7", "feature/x", "MERGED", "develop", "abc")
     monkeypatch.setattr(commentwatch, "find_pr_any_state", lambda repo, branch: merged)
     assert commentwatch.find_latest_pr("o/r", "feature/x").number == 7
+
+
+def test_hidden_html_comments_are_not_shown_in_a_review_body():
+    from cyclecontrol.comments import visible
+
+    assert visible("<!-- coderabbit-ai-generated:v1 -->\nUse a constant.") == "Use a constant."
+    assert visible("a <!-- x\ny --> b") == "a  b"
