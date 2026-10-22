@@ -614,10 +614,16 @@ def review_stage(
         }
     if blocking:
         who = ", ".join("@" + b for b in blocking)
+        approvers = state.get("approvers", [])
         return {
             "tone": "need",
             "headline": f"Changes requested by {who}",
-            "next": "The builder picks the comments up on the next check.",
+            "next": (
+                f"{', '.join('@' + a for a in approvers)} approved. Once {who}'s comments are addressed, "
+                "the builder dismisses the request so the approval can merge."
+                if approvers
+                else "The builder picks the comments up on the next check."
+            ),
         }
     if unresolved:
         return {

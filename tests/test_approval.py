@@ -356,3 +356,13 @@ def test_a_ci_item_for_an_old_head_is_discarded(tmp_path):
     assert store.record("k", [old]) == [old]
     store.discard_stale_ci("k", "ci:other")
     assert store.pr("k")["items"] == {} and store.pending_items("k") == []
+
+
+def test_changes_requested_alongside_an_approval_says_the_request_will_be_dismissed():
+    from cyclecontrol.comments import review_stage
+
+    stage = review_stage(_state(approved=False, blocking=["em"], approvers=["rio"]), 0, 0, None)
+    assert stage["headline"] == "Changes requested by @em"
+    assert "@rio approved" in stage["next"] and "dismisses the request" in stage["next"]
+    alone = review_stage(_state(approved=False, blocking=["em"], approvers=[]), 0, 0, None)
+    assert "dismiss" not in alone["next"]
