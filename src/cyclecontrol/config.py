@@ -58,6 +58,7 @@ class Settings(BaseSettings):
     auto_rebase: bool = False
     auto_comments: bool = True
     auto_requeue: bool = True
+    auto_resolve: bool = True
     comment_poll_seconds: int = 300
     comments_file: str = "~/.cycle-control/comments.json"
     rebase_poll_seconds: int = 60

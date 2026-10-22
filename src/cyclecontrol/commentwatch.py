@@ -70,8 +70,10 @@ class CommentWatcher:
         clock: Callable[[], float] = time.time,
         notifier: Callable[[str, str], None] = notify,
         runner: Callable[..., Any] = subprocess.run,
+        resolver: Callable[[str], None] = resolve_thread,
     ) -> None:
         self._settings = settings
+        self._resolver = resolver
         self._sessions = sessions
         self._store = store
         self._fetch = fetch
@@ -135,6 +137,8 @@ class CommentWatcher:
                 self._store.pr(key).update({"checked_at": self._clock(), "last_new": 0})
                 continue
             state = pr_state(raw)
+            self._resolve_answered_threads(key, raw, state)
+            state = pr_state(raw)
             self._store.set_state(key, state)
             self._store.pr(key)["resolved_threads"] = resolved_thread_ids(raw)
             failed = (
@@ -152,6 +156,43 @@ class CommentWatcher:
         self.last_poll = self._clock()
         self._store.save()
         return woken
+
+    def _resolve_answered_threads(
+        self, key: str, raw: dict[str, Any], state: dict[str, Any]
+    ) -> None:
+        """Safety net: a thread whose last word is the builder's reply is finished, so resolve it.
+
+        An open thread blocks the merge queue. Skipped: a thread opened by someone who has requested
+        changes (they should see the reply first) and one Elliot chose to answer without resolving.
+        """
+        if not self._settings.auto_resolve or not state.get("open"):
+            return
+        blocking = set(state.get("blocking", []))
+        kept_open = {
+            item.get("thread_id")
+            for item_key, item in (self._store.peek(key) or {}).get("items", {}).items()
+            if ((self._store.peek(key) or {}).get("resolutions", {}).get(item_key) or {}).get(
+                "state"
+            )
+            == "posted"
+            and not ((self._store.peek(key) or {}).get("resolutions", {}).get(item_key) or {}).get(
+                "resolved"
+            )
+        }
+        for thread in raw["reviewThreads"]["nodes"]:
+            comments = thread["comments"]["nodes"]
+            if thread["isResolved"] or not comments or MARKER not in comments[-1]["body"]:
+                continue
+            if (comments[0].get("author") or {}).get("login", "") in blocking or thread[
+                "id"
+            ] in kept_open:
+                continue
+            try:
+                self._resolver(thread["id"])
+            except GithubError:
+                logger.warning("Could not resolve thread %s on %s", thread["id"], key)
+                continue
+            thread["isResolved"] = True
 
     def tick(self) -> list[str]:
         """The local step, cheap enough to run every couple of seconds: resume, deliver, fall back."""

@@ -285,6 +285,7 @@ def rig(tmp_path, monkeypatch):
         fake.fetch,
         fake.find,
         lambda: clock["now"],
+        resolver=lambda _thread_id: None,
     )
     return watcher, manager, session, fake, clock, settings
 
@@ -1009,3 +1010,44 @@ def test_an_approval_with_a_real_comment_is_feedback_but_plain_praise_is_not():
     )
     _, items = parse_pr(raw)
     assert keys(items) == ["r:30"]
+
+
+def _answered_thread(tid, opener, resolved=False, builder_last=True):
+    comments = [c(1, opener, "please change")]
+    if builder_last:
+        comments.append(c(2, "owner", f"Agreed, deferring. {MARKER}"))
+    return thread(tid, comments, resolved=resolved)
+
+
+def test_a_thread_the_builder_answered_last_is_resolved_unless_the_opener_requested_changes(rig):
+    from cyclecontrol.comments import pr_state
+
+    watcher, _, _, _, _, _ = rig
+    done = []
+    watcher._resolver = done.append
+    raw = pr(
+        threads=[
+            _answered_thread("A", "sam"),
+            _answered_thread("B", "lee"),
+            _answered_thread("C", "kim", builder_last=False),
+            _answered_thread("D", "sam", resolved=True),
+        ],
+        reviews=[review(5, "lee", "CHANGES_REQUESTED", "x")],
+    )
+    watcher._resolve_answered_threads("o/abc#7", raw, pr_state(raw))
+    assert done == ["A"]
+    assert raw["reviewThreads"]["nodes"][0]["isResolved"] is True
+
+
+def test_a_reply_posted_without_resolving_is_left_open(rig):
+    from cyclecontrol.comments import pr_state
+
+    watcher, _, _, _, _, _ = rig
+    done = []
+    watcher._resolver = done.append
+    raw = pr(threads=[_answered_thread("A", "sam")])
+    store = watcher._store
+    store.pr("o/abc#7")["items"]["t:1"] = {"thread_id": "A"}
+    store.resolve("o/abc#7", "t:1", "posted", "x", resolved=False)
+    watcher._resolve_answered_threads("o/abc#7", raw, pr_state(raw))
+    assert done == []
