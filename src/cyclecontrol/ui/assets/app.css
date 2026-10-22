@@ -269,3 +269,4 @@ a{color:inherit;text-decoration:none}
 .chip.lane.k-merged{color:var(--merged);border-color:rgba(163,113,247,.55)}
 .dot.merged{background:var(--merged);box-shadow:0 0 6px var(--merged)}
 .tag.k-skipped,.tag.k-replied,.tag.k-fixed{white-space:nowrap}
+.agentview-row{margin-top:10px}

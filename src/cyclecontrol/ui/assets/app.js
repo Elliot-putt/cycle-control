@@ -16,6 +16,7 @@
   let activity = { feed: [], question: null, unavailable: false };
   let filter = store.get("filter", "mine");
   let startAs = store.get("startAs", "plan");
+  let agentView = store.get("agentView", "open");
   let selected = store.get("selected", "");
   let tab = "activity";
   let starting = new Set();
@@ -188,7 +189,13 @@
     err.textContent = message || state.error;
 
     const rank = { waiting: 0, working: 1, failed: 2, done: 3 };
-    const agents = [...state.sessions].sort((a, b) => rank[outcomeOf(a)] - rank[outcomeOf(b)]);
+    const everyAgent = [...state.sessions].sort((a, b) => rank[outcomeOf(a)] - rank[outcomeOf(b)]);
+    const mergedCount = everyAgent.filter(isMerged).length;
+    document.querySelectorAll("#agentview button").forEach((b) => {
+      b.classList.toggle("on", b.dataset.agentview === agentView);
+      b.textContent = `${b.dataset.agentview === "open" ? "Open" : "Merged"} ${b.dataset.agentview === "open" ? everyAgent.length - mergedCount : mergedCount}`;
+    });
+    const agents = everyAgent.filter((a) => (agentView === "merged") === isMerged(a));
     const groups = (state.groups || []).filter((g) => filter === "team" || g.isMine);
     const inGroup = new Set((state.groups || []).flatMap((g) => [g.id, ...g.children.map((c) => c.id)]));
     const issuesById = Object.fromEntries(state.issues.map((i) => [i.id, i]));
@@ -200,6 +207,10 @@
     const section = (title, rows, html, empty) =>
       `<div class="sec">${title}<span class="n">${rows.length}</span></div>` + (rows.length ? html : `<div class="none">${empty}</div>`);
     const queueRow = (q) => `<div class="row"><i class="pri k-queued"></i><span class="id">${esc(q.id)}</span><span class="t" title="${esc(q.title)}">${esc(q.title)}</span><span class="tag">#${q.position}</span><span class="go-group"><button class="go off" data-cancelq="${esc(q.id)}" title="Remove from the queue">Cancel</button></span></div>`;
+    if (agentView === "merged") {
+      $("list").innerHTML = section("Merged", agents, agents.map(agentCard).join(""), "Nothing merged yet.");
+      return;
+    }
     $("list").innerHTML =
       section("Agents", agents, agents.map(agentCard).join(""), "No builders running.") +
       (queue.length ? section("Queued", queue, queue.map(queueRow).join(""), "") : "") +
@@ -396,7 +407,7 @@
     const justWaiting = s && outcomeOf(s) === "waiting" && !wasWaiting[s.id];
     state.sessions.forEach((x) => { wasWaiting[x.id] = outcomeOf(x) === "waiting"; });
 
-    const rail = JSON.stringify([state.cycle, state.issues, state.sessions.map((x) => [x.id, x.title, x.phase, outcomeOf(x), x.activity, x.approved, x.comments]), state.error, filter, startAs, selected, [...starting], message, state.groups, state.queue, [...expanded], state.slotsUsed]);
+    const rail = JSON.stringify([state.cycle, state.issues, state.sessions.map((x) => [x.id, x.title, x.phase, outcomeOf(x), x.activity, x.approved, x.comments]), state.error, filter, startAs, agentView, selected, [...starting], message, state.groups, state.queue, [...expanded], state.slotsUsed]);
     if (rail !== railJson) { railJson = rail; renderRail(); }
     const head = JSON.stringify([s && [s.id, s.title, s.phase, outcomeOf(s), s.prUrl, s.approved, s.attention, s.comments, checking, confirming, [...approving], tab], tab, selected]);
     if (head !== headJson) { headJson = head; renderHead(); }
@@ -456,7 +467,7 @@
   }
 
   document.addEventListener("click", async (e) => {
-    const t = e.target.closest("[data-open],[data-start],[data-resume],[data-startready],[data-toggle],[data-cancelq],[data-filter],[data-startas],[data-tab],[data-key],[data-opt],[data-approve],[data-changes],[data-resolved],[data-comments],[data-checknow],[data-postreply],[data-dismiss],#m-stop,#send,summary");
+    const t = e.target.closest("[data-open],[data-start],[data-resume],[data-startready],[data-toggle],[data-cancelq],[data-filter],[data-agentview],[data-startas],[data-tab],[data-key],[data-opt],[data-approve],[data-changes],[data-resolved],[data-comments],[data-checknow],[data-postreply],[data-dismiss],#m-stop,#send,summary");
     if (!t) return;
     const d = t.dataset;
     if (t.tagName === "SUMMARY") {
@@ -481,6 +492,7 @@
     if (d.start) return start(d.start, false, d.base);
     if (d.resume) return start(d.resume, true);
     if (d.filter) { filter = d.filter; store.set("filter", filter); return render(); }
+    if (d.agentview) { agentView = d.agentview; store.set("agentView", agentView); railJson = ""; return render(); }
     if (d.startas) { startAs = d.startas; store.set("startAs", startAs); return render(); }
     if (d.tab) { tab = d.tab; bodyJson = ""; headJson = ""; return render(); }
     if (d.checknow) {
