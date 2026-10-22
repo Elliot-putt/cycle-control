@@ -995,3 +995,17 @@ def test_a_thread_resolved_on_github_is_marked_on_its_card(rig):
     watcher.poll()
     card = comments_view(watcher._store.peek("o/abc#7"), {})["items"][0]
     assert card["githubResolved"] is True
+
+
+def test_an_approval_with_a_real_comment_is_feedback_but_plain_praise_is_not():
+    raw = pr(
+        reviews=[
+            review(
+                30, "sam", "APPROVED", "Update a skill to use the existing EmptyState component."
+            ),
+            review(31, "lee", "APPROVED", "LGTM!"),
+            review(32, "kim", "APPROVED", ""),
+        ]
+    )
+    _, items = parse_pr(raw)
+    assert keys(items) == ["r:30"]

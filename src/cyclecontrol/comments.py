@@ -20,6 +20,10 @@ OTHER_BOTS = {
     "copilot-pull-request-reviewer",
     "codecov",
 }
+PRAISE_ONLY = re.compile(
+    r"^(lgtm|looks good( to me)?|approved?|ship it|nice( one)?|great|thanks?( you)?|:\+1:|👍|✅)[\s.!]*$",
+    re.IGNORECASE,
+)
 HTML_COMMENT = re.compile(r"<!--.*?-->", re.DOTALL)
 WALKTHROUGH_HINTS = ("auto-generated comment: summarize by coderabbit.ai", "walkthrough")
 REVIEW_BODY_SECTIONS = ("nitpick comments", "outside diff range", "duplicate comments")
@@ -302,7 +306,8 @@ def parse_pr(pr: dict[str, Any]) -> tuple[PrFacts, list[ReviewItem]]:
         if (
             MARKER in body
             or not body.strip()
-            or review["state"] in ("APPROVED", "DISMISSED", "PENDING")
+            or review["state"] in ("DISMISSED", "PENDING")
+            or (review["state"] == "APPROVED" and PRAISE_ONLY.match(body.strip()))
         ):
             continue
         if _skip_bot(review) or (
