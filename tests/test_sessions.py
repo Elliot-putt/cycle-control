@@ -293,3 +293,20 @@ def test_a_session_added_while_the_sessions_are_being_walked_does_not_break_the_
     finally:
         type(first).health = original
     assert added and "ABC-3" in manager._sessions
+
+
+def test_a_builder_with_no_saved_conversation_starts_fresh_instead_of_resuming(tmp_path):
+    from cyclecontrol.sessions import resume_choice
+
+    worktree = tmp_path / "spp-1"
+    worktree.mkdir()
+    assert resume_choice(worktree, True, "") == (False, "", True)
+    assert resume_choice(worktree, True, "abc") == (True, "abc", False)
+    assert resume_choice(worktree, False, "") == (False, "", False)
+
+
+def test_a_saved_conversation_is_resumed(tmp_path, monkeypatch):
+    from cyclecontrol import sessions
+
+    monkeypatch.setattr(sessions, "newest_transcript", lambda worktree: tmp_path / "x.jsonl")
+    assert sessions.resume_choice(tmp_path, True, "") == (True, "", False)

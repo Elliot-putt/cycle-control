@@ -56,6 +56,22 @@ def health_of(
     return "waiting" if idle_seconds >= waiting_after and not busy else "working"
 
 
+LOST_CONVERSATION = (
+    "Your earlier conversation for this issue could not be found, so you are starting fresh in a worktree that may already hold work. "
+    "Before anything else read the git dir's spp-phase.json and spp-plan.json, `git log` and `git status`, and any branches or worktrees the "
+    "plan lists. Carry on from where the work stands; do not redo finished work.\n\n"
+)
+
+
+def resume_choice(worktree: Path, resume: bool, resume_id: str) -> tuple[bool, str, bool]:
+    """Resume only when there is a conversation to resume. Returns (resume, resume_id, conversation_lost)."""
+    if not resume or resume_id:
+        return resume, resume_id, False
+    if newest_transcript(worktree) is None:
+        return False, "", True
+    return True, "", False
+
+
 class UnmappedTeamError(RuntimeError):
     pass
 
@@ -376,7 +392,11 @@ class SessionManager:
         if self._settings.demo:
             return self._start_demo(issue, mode, base)
         worktree = ensure_worktree(team, issue, base)
+        resume, resume_id, lost = resume_choice(worktree, resume, resume_id)
         prompt = prompt or builder_prompt(issue, worktree, mode, base)
+        if lost:
+            logger.warning("No conversation to resume for %s; starting fresh", issue.id)
+            prompt = LOST_CONVERSATION + prompt
         gitdir = git_dir(worktree)
         locks.acquire(gitdir, worktree, issue.id)
         pty = PtySession(
