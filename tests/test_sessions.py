@@ -271,3 +271,25 @@ def test_base_and_approval_flags_survive_a_restart_through_the_registry(tmp_path
         "https://x.slack.com/p1",
         True,
     )
+
+
+def test_a_session_added_while_the_sessions_are_being_walked_does_not_break_the_walk(tmp_path):
+    manager = SessionManager(settings_for(tmp_path))
+    first = add_session(manager, tmp_path, issue("ABC-1", team="ABC"))
+    add_session(manager, tmp_path, issue("ABC-2", team="ABC"))
+    added = []
+    original = type(first).health
+
+    def adding_health(self, waiting_after):
+        if not added:
+            added.append(add_session(manager, tmp_path, issue("ABC-3", team="ABC")))
+        return original(self, waiting_after)
+
+    type(first).health = adding_health
+    try:
+        manager.check_waiting()
+        manager.persist() if hasattr(manager, "persist") else None
+        manager.release_dead()
+    finally:
+        type(first).health = original
+    assert added and "ABC-3" in manager._sessions

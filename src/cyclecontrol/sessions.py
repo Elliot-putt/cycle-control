@@ -255,9 +255,7 @@ class SessionManager:
 
     def counted(self) -> list[Session]:
         """Builders that hold containers: alive and not waiting for review at the human phase."""
-        return [
-            s for s in self._sessions.values() if s.pty.is_alive() and s.progress().phase != "human"
-        ]
+        return [s for s in self.all() if s.pty.is_alive() and s.progress().phase != "human"]
 
     def queued_ids(self) -> set[str]:
         return {entry["issue"]["id"] for entry in self._queue}
@@ -427,7 +425,7 @@ class SessionManager:
                 "baseSha": s.base_sha,
                 **flags_of(s),
             }
-            for s in self._sessions.values()
+            for s in self.all()
             if not s.stopped
         ]
         write_registry(self._settings.state_path, sessions, self._queue)
@@ -500,7 +498,7 @@ class SessionManager:
         self._persist()
 
     def stop_all(self) -> None:
-        for session in self._sessions.values():
+        for session in self.all():
             session.pty.terminate()
             locks.release(session.git_dir, session.pty.pid)
 
@@ -510,7 +508,7 @@ class SessionManager:
 
     def release_dead(self) -> None:
         """Drop the locks of builders that have ended."""
-        for session in self._sessions.values():
+        for session in self.all():
             if not session.pty.is_alive():
                 locks.release(session.git_dir, session.pty.pid)
 
@@ -520,7 +518,7 @@ class SessionManager:
         waiting = self._settings.waiting_after_seconds
         fresh: list[Session] = []
         reminders: list[Session] = []
-        for session in self._sessions.values():
+        for session in self.all():
             is_waiting = session.health(waiting) == "waiting"
             if not is_waiting:
                 session.waiting_since = None
