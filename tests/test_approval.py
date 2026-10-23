@@ -354,7 +354,7 @@ def test_a_ci_item_for_an_old_head_is_discarded(tmp_path):
     store = CommentStore(tmp_path / "c.json")
     old = ci_item(_failing(), "https://github.com/o/r", 7)
     assert store.record("k", [old]) == [old]
-    store.discard_stale_ci("k", "ci:other")
+    store.discard_stale_ci("k", {"ci:other"})
     assert store.pr("k")["items"] == {} and store.pending_items("k") == []
 
 
@@ -366,3 +366,35 @@ def test_changes_requested_alongside_an_approval_says_the_request_will_be_dismis
     assert "@rio approved" in stage["next"] and "dismisses the request" in stage["next"]
     alone = review_stage(_state(approved=False, blocking=["em"], approvers=[]), 0, 0, None)
     assert "dismiss" not in alone["next"]
+
+
+def _conflicting(**over):
+    return _state(conflicting=True, base="feature/pp-1052", head="b5ffbbc40000", **over)
+
+
+def test_a_merge_conflict_is_a_need_you_status_even_when_queued_and_approved():
+    from cyclecontrol.comments import review_stage
+
+    stage = review_stage(_conflicting(labels=["mergequeue"]), 0, 0, None)
+    assert stage["tone"] == "need" and stage["headline"] == "Merge conflicts with feature/pp-1052"
+
+
+def test_a_conflicting_pr_is_neither_ready_to_merge_nor_a_requeue_candidate():
+    from cyclecontrol.comments import is_ready_to_merge, is_requeue_candidate
+
+    assert is_ready_to_merge(_conflicting()) is False
+    assert is_requeue_candidate(_conflicting(labels=["blocked"])) is False
+
+
+def test_a_conflict_becomes_an_item_for_a_handed_over_builder_and_expires_with_the_head(tmp_path):
+    from cyclecontrol.comments import CommentStore, PrFacts, conflict_item, feedback_text
+
+    item = conflict_item(_conflicting(), "https://github.com/o/r", 7)
+    assert item.key == "conflict:b5ffbbc4" and "git merge origin/feature/pp-1052" in item.body
+    text = feedback_text("o/r", PrFacts(7, "OPEN", "me", "feature/x", ""), [item])
+    assert "conflict:b5ffbbc4" in text and "git merge --abort" in text
+    assert conflict_item(_state(), "https://github.com/o/r", 7) is None
+    store = CommentStore(tmp_path / "c.json")
+    assert store.record("k", [item]) == [item]
+    store.discard_stale_ci("k", {"conflict:other"})
+    assert store.pending_items("k") == []

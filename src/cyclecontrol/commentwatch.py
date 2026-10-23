@@ -21,6 +21,7 @@ from cyclecontrol.comments import (
     ci_item,
     clean_draft,
     comments_view,
+    conflict_item,
     feedback_text,
     is_ready_to_merge,
     is_requeue_candidate,
@@ -141,14 +142,18 @@ class CommentWatcher:
             state = pr_state(raw)
             self._store.set_state(key, state)
             self._store.pr(key)["resolved_threads"] = resolved_thread_ids(raw)
-            failed = (
-                ci_item(state, f"https://github.com/{team.github_repo}", number)
-                if session.progress().phase == "human"
-                else None
-            )
-            self._store.discard_stale_ci(key, failed.key if failed else "")
-            if failed:
-                items.append(failed)
+            handed_over = session.progress().phase == "human"
+            repo_url = f"https://github.com/{team.github_repo}"
+            handed = [
+                one
+                for one in (
+                    ci_item(state, repo_url, number) if handed_over else None,
+                    conflict_item(state, repo_url, number) if handed_over else None,
+                )
+                if one
+            ]
+            self._store.discard_stale_ci(key, {one.key for one in handed})
+            items.extend(handed)
             fresh = self._store.record(key, items, self._clock())
             self._store.pr(key).update({"checked_at": self._clock(), "last_new": len(fresh)})
             if fresh:

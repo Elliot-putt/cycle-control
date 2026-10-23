@@ -153,6 +153,8 @@ def pr_state(pr: dict[str, Any]) -> dict[str, Any]:
         "mergedAt": pr.get("mergedAt") or "",
         "head": pr.get("headRefOid", ""),
         "draft": bool(pr.get("isDraft")),
+        "conflicting": pr.get("mergeable") == "CONFLICTING",
+        "base": pr.get("baseRefName", ""),
         "approved": approval.approved,
         "approvers": list(approval.approvers),
         "blocking": list(approval.blocking),
@@ -175,6 +177,7 @@ def is_requeue_candidate(state: dict[str, Any] | None, needs_you: int = 0) -> bo
         and state.get("ci") == "SUCCESS"
         and needs_you == 0
         and "blocked" in state.get("labels", [])
+        and not state.get("conflicting")
     )
 
 
@@ -192,6 +195,7 @@ def is_ready_to_merge(state: dict[str, Any] | None, needs_you: int = 0) -> bool:
         and needs_you == 0
         and "mergequeue" not in labels
         and "blocked" not in labels
+        and not state.get("conflicting")
     )
 
 
@@ -238,6 +242,32 @@ def ci_item(state: dict[str, Any], repo_url: str, number: int) -> ReviewItem | N
         key=f"ci:{head[:8]}",
         kind="ci",
         author="CI",
+        is_owner=False,
+        is_coderabbit=False,
+        body=body,
+        url=f"{repo_url}/pull/{number}",
+        created_at="",
+    )
+
+
+def conflict_item(state: dict[str, Any], repo_url: str, number: int) -> ReviewItem | None:
+    """A merge conflict on a PR whose builder has already handed over."""
+    head = state.get("head", "")
+    if not state.get("conflicting") or not head or not state.get("open") or state.get("draft"):
+        return None
+    base = state.get("base") or "the base branch"
+    body = (
+        f"PR #{number} has merge conflicts with {base} (head {head[:8]}). A sibling PR in the stack usually landed first.\n"
+        f"Merge the base in, do not rebase or force-push, because the PR is already reviewed: `git fetch origin && git merge origin/{base}`.\n"
+        "If every conflicted file is markdown or docs (a skill, a README), keep both sides' additions, commit, run the fast gates and push, "
+        "then run ~/.claude/spp/requeue.sh if the PR is blocked. If any conflicted file is code, a lock file or you are not sure, "
+        "`git merge --abort` and leave it as a needs-you with the file names.\n"
+        f'Record it with `~/.claude/spp/comment.sh conflict:{head[:8]} fixed "<what you did>"`. It posts nothing to GitHub.'
+    )
+    return ReviewItem(
+        key=f"conflict:{head[:8]}",
+        kind="conflict",
+        author="GitHub",
         is_owner=False,
         is_coderabbit=False,
         body=body,
@@ -392,8 +422,8 @@ def feedback_text(
             else ("CodeRabbit" if item.is_coderabbit else "reviewer")
         )
         where = f" {item.path}:{item.line}" if item.path else ""
-        if item.kind == "ci":
-            lines += [f"## {n}. id `{item.key}` · ci", *item.body.strip().splitlines(), ""]
+        if item.kind in ("ci", "conflict"):
+            lines += [f"## {n}. id `{item.key}` · {item.kind}", *item.body.strip().splitlines(), ""]
             continue
         lines += [f"## {n}. id `{item.key}` · {item.kind} · @{item.author} · {who}{where}"]
         if item.thread_id:
@@ -449,7 +479,7 @@ class CommentStore:
             if known:
                 continue
             seen.add(item.key)
-            if first and item.kind not in ("thread", "ci"):
+            if first and item.kind not in ("thread", "ci", "conflict"):
                 continue
             fresh.append(item)
         state["baselined"] = True
@@ -460,10 +490,12 @@ class CommentStore:
                 state["items"].pop(stale)
         return fresh
 
-    def discard_stale_ci(self, key: str, current: str) -> None:
-        """A CI failure that no longer matches the PR head is not worth a builder's time."""
+    def discard_stale_ci(self, key: str, current: set[str]) -> None:
+        """A CI failure or conflict that no longer matches the PR head is not worth a builder's time."""
         state = self.pr(key)
-        stale = [k for k in state["items"] if k.startswith("ci:") and k != current]
+        stale = [
+            k for k in state["items"] if k.startswith(("ci:", "conflict:")) and k not in current
+        ]
         for k in stale:
             state["items"].pop(k)
         state["pending"] = [k for k in state["pending"] if k not in stale]
@@ -600,6 +632,13 @@ def review_stage(
         }
     if state.get("draft"):
         return {"tone": "wait", "headline": "Draft PR", "next": "Mark it ready for review."}
+    if state.get("conflicting"):
+        base = state.get("base") or "the base branch"
+        return {
+            "tone": "need",
+            "headline": f"Merge conflicts with {base}",
+            "next": "Aviator cannot merge it until they are resolved. The builder resolves a docs-only conflict itself and asks you about a code conflict.",
+        }
     if needs_you:
         return {
             "tone": "need",
