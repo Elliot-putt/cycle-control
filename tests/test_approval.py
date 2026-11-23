@@ -354,7 +354,7 @@ def test_a_ci_item_for_an_old_head_is_discarded(tmp_path):
     store = CommentStore(tmp_path / "c.json")
     old = ci_item(_failing(), "https://github.com/o/r", 7)
     assert store.record("k", [old]) == [old]
-    store.discard_stale_ci("k", {"ci:other"})
+    store.discard_stale_ci("k", "otherhead")
     assert store.pr("k")["items"] == {} and store.pending_items("k") == []
 
 
@@ -390,11 +390,124 @@ def test_a_conflict_becomes_an_item_for_a_handed_over_builder_and_expires_with_t
     from cyclecontrol.comments import CommentStore, PrFacts, conflict_item, feedback_text
 
     item = conflict_item(_conflicting(), "https://github.com/o/r", 7)
-    assert item.key == "conflict:b5ffbbc4" and "git merge origin/feature/pp-1052" in item.body
+    assert item.key == "conflict:b5ffbbc4" and "rebase onto origin/feature/pp-1052" in item.body
     text = feedback_text("o/r", PrFacts(7, "OPEN", "me", "feature/x", ""), [item])
-    assert "conflict:b5ffbbc4" in text and "git merge --abort" in text
+    assert "conflict:b5ffbbc4" in text and "requeue.sh" in text and "Do not ask Elliot" in text
     assert conflict_item(_state(), "https://github.com/o/r", 7) is None
     store = CommentStore(tmp_path / "c.json")
     assert store.record("k", [item]) == [item]
-    store.discard_stale_ci("k", {"conflict:other"})
+    store.discard_stale_ci("k", "otherhead")
     assert store.pending_items("k") == []
+
+
+def test_an_unknown_mergeable_is_not_ready_and_is_rechecked_soon():
+    from cyclecontrol.comments import is_ready_to_merge, is_requeue_candidate, review_stage
+
+    unknown = pr_state(full_pr(mergeable="UNKNOWN"))
+    assert unknown["mergeable"] == "UNKNOWN" and unknown["conflicting"] is False
+    assert is_ready_to_merge(unknown) is False
+    assert (
+        is_requeue_candidate(
+            pr_state(full_pr(mergeable="UNKNOWN", labels={"nodes": [{"name": "blocked"}]}))
+        )
+        is False
+    )
+    assert review_stage(unknown, 0, 0, None)["headline"] == "GitHub is still checking for conflicts"
+    assert is_ready_to_merge(pr_state(full_pr(mergeable="MERGEABLE"))) is True
+
+
+def test_a_pr_with_unknown_mergeability_is_due_again_within_a_minute(tmp_path):
+    from cyclecontrol.commentwatch import QUEUE_POLL_SECONDS, CommentWatcher
+    from cyclecontrol.sessions import SessionManager
+    from tests.test_sessions import settings_for
+
+    settings = settings_for(tmp_path)
+    store = CommentStore(tmp_path / "c.json")
+    clock = {"now": 1000.0}
+    watcher = CommentWatcher(
+        settings,
+        SessionManager(settings),
+        store,
+        lambda r, n: {},
+        lambda r, b: None,
+        lambda: clock["now"],
+    )
+    key = "o/r#7"
+    store.record(key, [])
+    store.set_state(key, _state(mergeable="UNKNOWN"))
+    store.pr(key)["checked_at"] = clock["now"]
+    clock["now"] += QUEUE_POLL_SECONDS
+    assert watcher._due(key) is True
+    store.set_state(key, _state(mergeable="MERGEABLE"))
+    assert watcher._due(key) is False
+
+
+def test_only_the_newest_run_of_a_github_action_counts_so_a_cancelled_older_run_is_not_a_failure():
+    from cyclecontrol.comments import check_links, latest_checks, real_checks
+
+    nodes = [
+        {
+            "__typename": "CheckRun",
+            "name": "API breaking changes",
+            "status": "COMPLETED",
+            "conclusion": "CANCELLED",
+            "startedAt": "2026-11-03T10:39:35Z",
+            "detailsUrl": "https://gh/old",
+        },
+        {
+            "__typename": "CheckRun",
+            "name": "API breaking changes",
+            "status": "COMPLETED",
+            "conclusion": "SUCCESS",
+            "startedAt": "2026-11-03T10:31:16Z",
+        },
+        {
+            "__typename": "CheckRun",
+            "name": "API breaking changes",
+            "status": "COMPLETED",
+            "conclusion": "SUCCESS",
+            "startedAt": "2026-11-03T10:39:39Z",
+            "detailsUrl": "https://gh/new",
+        },
+        {
+            "__typename": "StatusContext",
+            "context": "ci/circleci: lint-js-style",
+            "state": "FAILURE",
+            "targetUrl": "https://app.circleci.com/workflow/abc/job/def",
+        },
+    ]
+    rollup = {"state": "FAILURE", "contexts": {"nodes": nodes}}
+    assert real_checks(rollup) == [
+        ("API breaking changes", "SUCCESS"),
+        ("ci/circleci: lint-js-style", "FAILURE"),
+    ]
+    assert len(latest_checks(rollup)) == 2
+    assert check_links(rollup) == {
+        "API breaking changes": "https://gh/new",
+        "ci/circleci: lint-js-style": "https://app.circleci.com/workflow/abc/job/def",
+    }
+
+
+def test_the_stage_says_when_ci_is_re_running_after_an_infrastructure_failure():
+    from cyclecontrol.comments import review_stage
+
+    pending = review_stage({**_state(ci="PENDING"), "ciReruns": 1}, 0, 0, None)
+    assert pending["headline"] == "CI is re-running" and "Attempt 2" in pending["next"]
+    failed = review_stage({**_state(ci="FAILURE"), "ciReruns": 2}, 0, 0, None)
+    assert failed["headline"] == "CI is failing" and "Re-run 2 times" in failed["next"]
+
+
+def test_the_street_merge_queue_label_counts_as_queued_everywhere():
+    from cyclecontrol.comments import is_ready_to_merge, merge_label_for, queued, review_stage
+
+    street = _state(labels=["Merge Queue: Good to Go", "size/L"])
+    assert queued(street["labels"]) and not queued(["size/L"])
+    assert (
+        review_stage(street, 0, 0, None)["headline"]
+        == review_stage(_state(labels=["mergequeue"]), 0, 0, None)["headline"]
+    )
+    assert not is_ready_to_merge(street, 0), "already queued, so not announced as ready again"
+    assert merge_label_for("AgentSoftware/street") == "Merge Queue: Good to Go"
+    assert merge_label_for("AgentSoftware/street-partner-platform") == "mergequeue"
+    assert merge_label_for("AgentSoftware/street-infra") == "", "no merge queue there"
+    assert "" not in __import__("cyclecontrol.comments", fromlist=["MERGE_LABELS"]).MERGE_LABELS

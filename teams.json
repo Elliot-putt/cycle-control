@@ -5,5 +5,19 @@
     "agent": "spp-builder",
     "baseBranch": "develop",
     "worktreePrefix": "spp"
+  },
+  "SLM": {
+    "repo": "~/code/street-partner-platform",
+    "github": "AgentSoftware/street-partner-platform",
+    "agent": "spp-builder",
+    "baseBranch": "develop",
+    "worktreePrefix": "slm"
+  },
+  "CON": {
+    "repo": "~/code/consumer-v3",
+    "github": "AgentSoftware/consumer-v3",
+    "agent": "spp-builder",
+    "baseBranch": "develop",
+    "worktreePrefix": "con"
   }
 }

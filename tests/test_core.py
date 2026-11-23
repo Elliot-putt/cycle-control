@@ -200,7 +200,10 @@ def test_post_pr_link_returns_the_link_from_claudes_reply(monkeypatch):
     monkeypatch.setattr(slack.subprocess, "run", fake_run)
     link = slack.post_pr_link("claude", "C1", "Title", "https://github.com/o/r/pull/1")
     assert link == "https://sporthub.slack.com/archives/C1/p123"
-    assert "mcp__claude_ai_Slack__slack_send_message,ToolSearch" in calls["argv"]
+    assert (
+        "mcp__claude_ai_Slack__slack_send_message,mcp__plugin_slack_slack__slack_send_message,mcp__plugin_engineering_slack__slack_send_message,ToolSearch"
+        in calls["argv"]
+    )
     assert "Title" in calls["input"]
 
 
@@ -270,6 +273,34 @@ def test_static_assets_are_served_with_no_cache_so_a_reload_gets_the_new_ui(tmp_
     assert asyncio.run(run()) == (200, "no-cache", None)
 
 
+def test_the_screen_and_thread_dump_endpoints_answer_without_a_builder(tmp_path):
+    """SLM-1438, 2026-11-10: a builder sat on an API error all night with no nudge and the UI crawled; neither
+    could be looked into from outside the process."""
+    import asyncio
+
+    from aiohttp.test_utils import TestClient, TestServer
+
+    from cyclecontrol.server import App
+
+    async def run():
+        app = App(
+            Settings(
+                demo=True,
+                state_file=str(tmp_path / "s.json"),
+                comments_file=str(tmp_path / "c.json"),
+            )
+        )
+        async with TestClient(TestServer(app.build())) as client:
+            missing = await client.get("/api/sessions/SLM-0/screen")
+            threads = await (await client.get("/api/debug/threads")).json()
+            return missing.status, [t["name"] for t in threads["threads"]], threads["threads"][0]
+
+    status, names, first = asyncio.run(run())
+    assert status == 404
+    assert "MainThread" in names
+    assert "File " in first["stack"]
+
+
 def test_a_background_step_that_fails_is_logged_and_the_loop_carries_on(caplog):
     import asyncio
 
@@ -314,3 +345,165 @@ def test_old_saved_pr_state_without_newer_fields_does_not_raise():
     assert is_requeue_candidate(old) is False and is_ready_to_merge(old) is False
     assert lane_label(old, 0, None) == "" and "approved" in approval_line(old, [])
     assert approval_line({"approved": False}, []).startswith("Approval: not approved")
+
+
+def test_tail_joins_only_the_last_chunks_of_scrollback():
+    from cyclecontrol.pty import PtySession, SleepingPty
+
+    pty = PtySession(["true"], "/")
+    pty.scrollback = [b"a" * 100, b"b" * 100, b"c" * 100]
+    assert pty.tail(150) == b"b" * 50 + b"c" * 100
+    assert pty.tail(1000) == b"a" * 100 + b"b" * 100 + b"c" * 100
+    asleep = SleepingPty()
+    assert asleep.tail() == b"" and asleep.attach(lambda _: None) == []
+    assert not asleep.is_alive() and asleep.exit_status() is None and asleep.pid == 0
+
+
+def test_a_clock_jump_past_the_pause_runs_the_catch_up_before_the_next_step():
+    import asyncio
+
+    from cyclecontrol.server import CLOCK_JUMP_SECONDS, run_forever
+
+    clock = {"now": 1000.0}
+    seen = []
+
+    async def step():
+        seen.append("step")
+
+    async def catch_up(away):
+        seen.append(("jump", int(away)))
+
+    async def run():
+        task = asyncio.create_task(
+            run_forever("watch", step, 0.01, after_jump=catch_up, clock=lambda: clock["now"])
+        )
+        await asyncio.sleep(0.05)
+        clock["now"] += CLOCK_JUMP_SECONDS + 600
+        await asyncio.sleep(0.05)
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
+
+    asyncio.run(run())
+    jumps = [s for s in seen if s != "step"]
+    assert len(jumps) == 1 and jumps[0][1] >= CLOCK_JUMP_SECONDS + 600 - 1
+    assert seen[seen.index(jumps[0]) + 1] == "step"
+
+
+def test_posted_pr_links_reads_the_channel_and_maps_each_pr_to_its_message(monkeypatch):
+    from cyclecontrol import slack
+
+    reply = (
+        '```json\n[{"pr": "https://github.com/o/r/pull/1760/changes", "ts": "1793783732.377339"},'
+        ' {"pr": "https://github.com/o/r/pull/1765", "ts": "1793783732.377339"},'
+        ' {"pr": "https://github.com/o/r/pull/1760", "ts": "1793700000.000001"}]\n```'
+    )
+    monkeypatch.setattr(
+        slack.subprocess, "run", lambda argv, **k: subprocess.CompletedProcess(argv, 0, reply, "")
+    )
+    found = slack.posted_pr_links("claude", "C1", "sporthub")
+    assert found == {
+        "https://github.com/o/r/pull/1760": "https://sporthub.slack.com/archives/C1/p1793783732377339",
+        "https://github.com/o/r/pull/1765": "https://sporthub.slack.com/archives/C1/p1793783732377339",
+    }, "the suffix is dropped and the newest message wins"
+
+
+def test_posted_pr_links_fails_loudly_on_prose(monkeypatch):
+    from cyclecontrol import slack
+
+    monkeypatch.setattr(
+        slack.subprocess,
+        "run",
+        lambda argv, **k: subprocess.CompletedProcess(argv, 0, "I cannot read that channel", ""),
+    )
+    with pytest.raises(slack.SlackError):
+        slack.posted_pr_links("claude", "C1", "sporthub")
+
+
+def test_linear_retries_once_when_a_request_times_out(monkeypatch):
+    import httpx
+
+    from cyclecontrol import linear
+
+    client = linear.LinearClient("key", "SLM")
+    calls = []
+
+    def post(url, json):
+        calls.append(json["query"])
+        if len(calls) == 1:
+            raise httpx.ReadTimeout("slow")
+        return httpx.Response(
+            200,
+            json={"data": {"viewer": {"id": "me"}}},
+            request=httpx.Request("POST", linear.API_URL),
+        )
+
+    monkeypatch.setattr(client._http, "post", post)
+
+    assert client._post("query { viewer { id } }", {}) == {"viewer": {"id": "me"}}
+    assert len(calls) == 2
+
+
+def test_pr_links_are_read_from_anywhere_in_the_phase_note(tmp_path):
+    """SLM-1428 wrote "Stack, merge in order: <url> ... then <url>" and the board saw no PR at all."""
+    import json
+
+    from cyclecontrol.progress import read_progress
+
+    (tmp_path / "spp-phase.json").write_text(
+        json.dumps(
+            {
+                "phase": "human",
+                "note": "Stack, merge in order: https://github.com/o/r/pull/1837 (editor), "
+                "then https://github.com/o/r/pull/1838 (stacked on #1837)",
+            }
+        )
+    )
+
+    progress = read_progress(tmp_path)
+
+    assert progress.pr_url == "https://github.com/o/r/pull/1837 https://github.com/o/r/pull/1838"
+
+
+def test_cancelled_issues_are_dropped_from_the_cycle_and_the_family():
+    from cyclecontrol.linear import merge_family, parse_dashboard
+
+    def node(ident, state_type, parent=None):
+        return {
+            "identifier": ident,
+            "title": ident,
+            "url": "",
+            "branchName": "",
+            "priority": 0,
+            "createdAt": "",
+            "team": {"key": "SLM"},
+            "parent": {"identifier": parent} if parent else None,
+            "children": {"nodes": []},
+            "state": {"name": state_type, "type": state_type},
+            "assignee": None,
+            "inverseRelations": {"nodes": []},
+        }
+
+    data = {
+        "viewer": {"assignedIssues": {"nodes": []}},
+        "cycles": {
+            "nodes": [
+                {
+                    "number": 1,
+                    "endsAt": "2099-01-01T00:00:00+00:00",
+                    "issues": {"nodes": [node("SLM-1", "started"), node("SLM-2", "canceled")]},
+                }
+            ]
+        },
+    }
+    cycle, issues = parse_dashboard(data)
+    assert [i.id for i in issues] == ["SLM-1"]
+    assert cycle.total == 1
+    parent = node("SLM-9", "started")
+    parent["children"] = {
+        "nodes": [node("SLM-3", "canceled", "SLM-9"), node("SLM-4", "unstarted", "SLM-9")]
+    }
+    merged = merge_family(issues, {"p": parent}, set())
+    assert [i.id for i in merged] == ["SLM-1", "SLM-9", "SLM-4"]

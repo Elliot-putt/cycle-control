@@ -42,7 +42,9 @@ A parent with sub-issues shows as one collapsible row under Stacks, with one str
 - A child with several blockers waits until all are merged.
 - Start ready on the parent queues every ready child in order, each with its base branch.
 
-At most `MAX_BUILDERS` (3) builders with containers run at once. A builder at the `human` phase has run `just worktree-down` and does not count. The rest queue and start as slots free up. The queue survives a restart.
+At most `MAX_BUILDERS` (default 3) builders with containers run at once. A builder at the `human` phase has run `just worktree-down` and does not count. The rest queue and start as slots free up. The queue survives a restart.
+
+Each builder is a full Claude Code process, so `MAX_LIVE_BUILDERS` (default 6) also caps live processes whatever their phase. A builder that is only waiting is put to sleep (process ended, row, plan, PR link, badges and comments kept): at `human` after `PARK_AFTER_SECONDS` (default 900), anywhere else after `WAITING_CLOSE_SECONDS` (default 3600); never while a test or gates run is under it, output is recent, or a rebase conflict needs you. Opening its row or sending it a message wakes it with `--resume` (the message becomes the resume prompt), as does new review feedback; it queues if the cap is full. A builder whose PR is merged or closed is finished: ended for good, never restarted on launch, not counted. On launch only builders that were working are resumed; waiting, sleeping and `human` ones come back asleep. `RESUME_ALL_ON_LAUNCH=true` restores the old resume-everything behaviour.
 
 ## Review comments
 
@@ -50,7 +52,7 @@ Every `COMMENT_POLL_SECONDS` (300) the app runs one `gh api graphql` call per op
 
 - New feedback is written to `spp-feedback/<time>.md` in the builder's git dir, and the builder is told to read it. It follows the Review comments rules in `spp-builder.md`.
 - If the builder is busy, the feedback waits and is delivered when it is idle.
-- If the builder's session has ended, it is resumed with `claude --resume <session id>` (re-provisioning the worktree first if it was never provisioned). If that fails, a new `spp-builder` is started in the same worktree with the PR number.
+- A PR that conflicts with its base (GitHub says CONFLICTING, or Aviator swapped `mergequeue` for `blocked` with a conflict comment) never waits for you: the builder is woken and told to rebase onto the base (never merge it in), resolve, push with `--force-with-lease` and run `requeue.sh`, once per head sha and at most once every 10 minutes per PR. A `conflict` item only needs you if the builder itself comes back with a question after that; if the PR is still `blocked` afterwards the lane says "blocked: not re-queued". If the builder's session has ended, it is resumed with `claude --resume <session id>` (re-provisioning the worktree first if it was never provisioned). If that fails, a new `spp-builder` is started in the same worktree with the PR number.
 - The builder records each item with `comment.sh`. The lane shows "addressed N · M needs you"; click it for each comment, the action and the reply. A needs-you item shows the drafted reply to edit and post, or dismiss.
 - The builder's replies end with `<!-- spp-builder -->`, so they are never delivered back as new feedback. Set `AUTO_COMMENTS=false` to turn polling off.
 
@@ -64,13 +66,17 @@ If you applied `mergequeue` and the merge bot added `blocked`, the app runs `~/.
 
 Posting a drafted reply from the app adds the `<!-- spp-builder -->` marker and marks the thread seen, so it is never handed back to the builder.
 
+## Nuke
+
+Nuke, on an agent card or next to Stop, tears one issue down after a confirm that lists the open PR number and the uncommitted and unpushed work that would be lost: it ends and forgets the builder, closes an open PR (branch kept), unassigns the Linear issue (status unchanged), runs `just worktree-down` and `just worktree-remove <branch>` (falling back to `git worktree remove --force`; the local branch is deleted only if merged) on the verified `~/code/spp-<n>` linked worktree, and drops the row. It runs in the background: the card shows Nuking… with each step as it completes, a clean finish removes the row with a toast, and a failed step leaves a red Nuke incomplete chip naming the step and why, with Retry and Dismiss. One nuke per issue at a time; several issues can be nuked at once. Each step reports on its own; a failure does not stop the rest. The main checkout or any path outside the worktree slot is refused.
+
 ## One builder per worktree
 
 Each running builder holds `spp-builder.lock` in the worktree's git dir. A new builder is refused while the lock holder is alive, or while any other `claude` process has the worktree as its working directory. The resume fallback starts a new `spp-builder` only after confirming the old process is gone.
 
 ## Rebase on a moved base (off by default)
 
-With `AUTO_REBASE=true`, every `REBASE_POLL_SECONDS` the app compares each stacked builder's base branch with the sha it was built on. If it moved or its PR merged, it replays the builder's commits in a scratch worktree. A clean result becomes an instruction to the builder (rebase `--onto`, retarget the PR, fast gates, `--force-with-lease`). A conflict is never given to an agent: the lane shows Needs you, with an "I resolved it" button.
+With `AUTO_REBASE=true`, every `REBASE_POLL_SECONDS` the app compares each stacked builder's base branch with the sha it was built on. If it moved or its PR merged, it replays the builder's commits in a scratch worktree. A clean result becomes an instruction to the builder (rebase `--onto`, retarget the PR, fast gates, `--force-with-lease`). A replay conflict shows Needs you with an "I resolved it" button, but a PR conflict reported by GitHub or Aviator is handed to the builder by the comment watcher (above), which also clears that flag.
 
 ## Develop
 

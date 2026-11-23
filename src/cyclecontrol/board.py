@@ -132,9 +132,16 @@ class Board:
         except Exception:
             logger.exception("Could not move %s to In Progress", issue_id)
 
+    def forget(self, issue_id: str) -> None:
+        """Drop the row until the next refresh brings it back, if Linear still lists it."""
+        self.issues = [i for i in self.issues if i.id != issue_id]
+        self._overrides.pop(issue_id, None)
+
     def view(self) -> list[Issue]:
         shown: list[Issue] = []
         for issue in self.issues:
+            if issue.is_cancelled:
+                continue
             override = self._overrides.get(issue.id)
             shown.append(
                 replace(issue, status=override[0], status_type=override[1]) if override else issue

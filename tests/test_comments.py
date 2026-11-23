@@ -7,6 +7,7 @@ from cyclecontrol import commentwatch
 from cyclecontrol.comments import (
     MARKER,
     CommentStore,
+    ReviewItem,
     comments_view,
     feedback_text,
     parse_pr,
@@ -14,7 +15,7 @@ from cyclecontrol.comments import (
 )
 from cyclecontrol.commentwatch import CommentWatcher
 from cyclecontrol.github import GithubError
-from cyclecontrol.sessions import SessionManager
+from cyclecontrol.sessions import SessionManager, read_registry
 from tests.test_sessions import add_session, issue, settings_for
 
 
@@ -120,11 +121,11 @@ def test_comments_skip_the_builders_own_bots_and_coderabbits_walkthrough():
             ]
         )
     )
-    assert keys(items) == ["c:13", "c:14", "c:15"]
+    assert keys(items) == ["c:13", "c:14"]
     assert items[1].is_owner and not items[0].is_owner
 
 
-def test_review_bodies_count_for_requested_changes_and_coderabbit_sections_only():
+def test_review_bodies_count_for_requested_changes_and_never_for_coderabbit():
     _, items = parse_pr(
         pr(
             reviews=[
@@ -142,7 +143,7 @@ def test_review_bodies_count_for_requested_changes_and_coderabbit_sections_only(
             ]
         )
     )
-    assert keys(items) == ["r:21", "r:23"]
+    assert keys(items) == ["r:21"]
 
 
 def test_the_first_look_delivers_unresolved_threads_but_baselines_old_comments(tmp_path):
@@ -452,7 +453,7 @@ def test_bots_without_a_bot_suffix_are_recognised_by_their_github_type():
         "createdAt": "",
     }
     _, items = parse_pr(pr(comments=[bot, codecov, rabbit, human]))
-    assert keys(items) == ["c:42", "c:43"]
+    assert keys(items) == ["c:43"]
     _, threads = parse_pr(pr(threads=[thread("T9", [codecov]), thread("T10", [rabbit])]))
     assert keys(threads) == ["t:42"]
 
@@ -1051,3 +1052,741 @@ def test_a_reply_posted_without_resolving_is_left_open(rig):
     store.resolve("o/abc#7", "t:1", "posted", "x", resolved=False)
     watcher._resolve_answered_threads("o/abc#7", raw, pr_state(raw))
     assert done == []
+
+
+def test_a_builder_whose_pr_is_merged_is_finished_and_not_revived(rig, monkeypatch):
+    watcher, manager, session, fake, _clock, settings = rig
+    old_pty = session.pty
+    fake.raw = pr(state="MERGED")
+    watcher.poll()
+    revived = []
+    monkeypatch.setattr(
+        SessionManager, "revive_for_comments", lambda self, *a: revived.append(1) or "started"
+    )
+    watcher.tick()
+    assert session.finished and old_pty.terminated and not session.pty.is_alive()
+    assert session.outcome(20) == "finished" and manager.live() == []
+    watcher._store.pr("o/abc#7")["pending"] = ["t:1"]
+    watcher.tick()
+    watcher.tick()
+    assert revived == []
+    saved = {e["issue"]["id"]: e for e in read_registry(settings.state_path)["sessions"]}
+    assert saved["ABC-12"]["finished"] is True
+
+
+def test_a_sleeping_builder_is_only_revived_for_new_feedback(rig, monkeypatch):
+    watcher, manager, session, _fake, _clock, _ = rig
+    watcher.poll()
+    manager._sleep(session)
+    revived = []
+    monkeypatch.setattr(
+        SessionManager, "revive_for_comments", lambda self, *a: revived.append(1) or "started"
+    )
+    monkeypatch.setattr("cyclecontrol.locks.PROCS.claude_pids_in", lambda path: [])
+    watcher.tick()
+    assert revived == [] and session.outcome(20) == "sleeping"
+    _fake.raw = pr(threads=[thread("T1", [c(1, "sam", "Rename this")])])
+    assert watcher.poll() == ["ABC-12"]
+    watcher.tick()
+    assert revived == [1]
+
+
+@pytest.mark.parametrize(
+    ("text", "expected"),
+    [
+        (
+            "Waiting on Elliot to pick: (1) rerun the suite (2) skip the browser job (3) revert",
+            ["rerun the suite", "skip the browser job", "revert"],
+        ),
+        ("Pick one:\n1) Rerun it\n2) Skip it\n", ["Rerun it", "Skip it"]),
+        ("1. Retry\n2. Investigate the flake\n", ["Retry", "Investigate the flake"]),
+        ("(1) a\n(2) b", ["a", "b"]),
+        ("CI is red and I am not sure why.", []),
+    ],
+)
+def test_numbered_options_are_parsed_out_of_the_builders_note(text, expected):
+    from cyclecontrol.comments import builder_options
+
+    found = builder_options(text)
+    assert [o["label"] for o in found] == expected
+    assert [o["key"] for o in found] == [str(n) for n in range(1, len(expected) + 1)]
+
+
+def ci_rig(rig, monkeypatch, phase="human"):
+    from tests.test_approval import full_pr
+
+    watcher, manager, session, fake, _clock, _settings = rig
+    (session.git_dir / "spp-phase.json").write_text(json.dumps({"phase": phase}))
+    fake.raw = full_pr(
+        headRefOid="ef3763b7aa",
+        commits={
+            "nodes": [
+                {
+                    "commit": {
+                        "oid": "ef3763b7aa",
+                        "statusCheckRollup": {
+                            "state": "FAILURE",
+                            "contexts": {
+                                "nodes": [
+                                    {
+                                        "__typename": "CheckRun",
+                                        "name": "ci/circleci: test-php-browser",
+                                        "status": "COMPLETED",
+                                        "conclusion": "FAILURE",
+                                    }
+                                ]
+                            },
+                        },
+                    }
+                }
+            ]
+        },
+    )
+    for name in ("reply_to_review_comment", "comment_on_pr", "resolve_thread"):
+        monkeypatch.setattr(
+            commentwatch,
+            name,
+            lambda *a, **k: (_ for _ in ()).throw(AssertionError("GitHub touched")),
+        )
+    assert watcher.poll() == ["ABC-12"]
+    watcher._store.mark_delivered("o/abc#7")
+    (session.git_dir / "spp-comments.jsonl").write_text(
+        json.dumps(
+            {
+                "id": "ci:ef3763b7",
+                "action": "needs_you",
+                "reply": "Waiting on Elliot to pick: (1) rerun the suite (2) skip the browser job",
+            }
+        )
+        + "\n"
+    )
+    return watcher, manager, session, fake
+
+
+def test_a_ci_item_that_needs_you_shows_the_builders_options_and_its_kind(rig, monkeypatch):
+    watcher, _manager, session, _fake = ci_rig(rig, monkeypatch)
+    view = watcher.view(session)
+    item = view["items"][0]
+    assert (item["kind"], item["state"], view["needsYou"]) == ("ci", "needs_you", 1)
+    assert [o["label"] for o in item["options"]] == ["rerun the suite", "skip the browser job"]
+    assert item["reply"].startswith("Waiting on Elliot")
+
+
+def test_answering_a_ci_item_goes_to_the_builder_not_github_and_is_not_raised_again(
+    rig, monkeypatch
+):
+    watcher, _manager, session, fake = ci_rig(rig, monkeypatch)
+    assert (
+        watcher.answer_builder(session, "ci:ef3763b7", "Go with option 1: rerun the suite")
+        == "running"
+    )
+    assert session.pty.sent == [b"Go with option 1: rerun the suite"]
+    view = watcher.view(session)
+    assert view["needsYou"] == 0 and view["items"][0]["state"] == "answered"
+    assert view["addressed"] == 1 and watcher._store.peek("o/abc#7")["pending"] == []
+    watcher._store.pr("o/abc#7")["checked_at"] = 0
+    assert watcher.poll() == [] and watcher._store.peek("o/abc#7")["pending"] == []
+    assert watcher.view(session)["items"][0]["state"] == "answered"
+    fake.raw["headRefOid"] = "ff00ff00aa"
+    fake.raw["commits"]["nodes"][0]["commit"]["oid"] = "ff00ff00aa"
+    watcher._store.pr("o/abc#7")["checked_at"] = 0
+    assert watcher.poll() == ["ABC-12"]
+    assert [k for k in watcher._store.peek("o/abc#7")["items"]] == ["ci:ff00ff00"]
+
+
+def test_dismissing_a_ci_item_ignores_that_commit_only(rig, monkeypatch):
+    watcher, _manager, session, _fake = ci_rig(rig, monkeypatch)
+    watcher.dismiss(session, "ci:ef3763b7")
+    assert watcher.view(session)["needsYou"] == 0 and session.pty.sent == []
+    watcher._store.pr("o/abc#7")["checked_at"] = 0
+    assert watcher.poll() == []
+
+
+def test_answering_a_sleeping_builder_wakes_it_with_the_answer(rig, monkeypatch):
+    watcher, manager, session, _fake = ci_rig(rig, monkeypatch)
+    manager._sleep(session)
+    woken = []
+    monkeypatch.setattr(
+        SessionManager, "wake", lambda self, i, prompt="": woken.append((i, prompt)) or "started"
+    )
+    assert watcher.answer_builder(session, "ci:ef3763b7", "skip it") == "started"
+    assert woken == [("ABC-12", "skip it")]
+
+
+def test_a_review_thread_cannot_be_answered_to_the_builder_and_an_empty_answer_is_refused(
+    rig, monkeypatch
+):
+    watcher, _manager, session, _fake = ci_rig(rig, monkeypatch)
+    with pytest.raises(GithubError, match="empty"):
+        watcher.answer_builder(session, "ci:ef3763b7", "  ")
+    watcher._store.pr("o/abc#7")["items"]["t:9"] = {"kind": "thread", "author": "sam", "body": "x"}
+    with pytest.raises(GithubError, match="Only a CI or conflict"):
+        watcher.answer_builder(session, "t:9", "hi")
+
+
+def conflict_rig(rig, monkeypatch, head="ef3763b7aa", mergeable="CONFLICTING", comments=()):
+    from tests.test_approval import full_pr
+
+    watcher, manager, session, fake, _clock, _settings = rig
+    (session.git_dir / "spp-phase.json").write_text(json.dumps({"phase": "human"}))
+    fake.raw = full_pr(
+        headRefOid=head,
+        mergeable=mergeable,
+        baseRefName="develop",
+        comments={"nodes": list(comments)},
+    )
+    watcher._store.numbers["ABC-12"] = 7
+    woken = []
+    monkeypatch.setattr(
+        SessionManager, "wake", lambda self, i, prompt="": woken.append((i, prompt)) or "running"
+    )
+    for name in ("reply_to_review_comment", "comment_on_pr", "resolve_thread"):
+        monkeypatch.setattr(
+            commentwatch,
+            name,
+            lambda *a, **k: (_ for _ in ()).throw(AssertionError("GitHub touched")),
+        )
+    return watcher, manager, session, fake, woken
+
+
+def test_a_conflict_is_handed_to_the_builder_once_per_sha_and_never_needs_you(rig, monkeypatch):
+    watcher, _manager, session, fake, woken = conflict_rig(rig, monkeypatch)
+    assert watcher.poll() == []
+    assert len(woken) == 1 and woken[0][0] == "ABC-12"
+    prompt = woken[0][1]
+    assert "PR #7 has merge conflicts with develop" in prompt and "Do not ask Elliot" in prompt
+    assert "requeue.sh" in prompt
+    view = watcher.view(session)
+    assert view["needsYou"] == 0 and view["waiting"] == 1
+    assert view["items"][0]["kind"] == "conflict" and view["items"][0]["state"] == "delivered"
+    watcher._store.pr("o/abc#7")["checked_at"] = 0
+    watcher.poll()
+    watcher.tick()
+    assert len(woken) == 1
+    fake.raw["headRefOid"] = "ff00ff00aa"
+    watcher._store.pr("o/abc#7")["checked_at"] = 0
+    watcher.poll()
+    assert len(woken) == 1
+    rig[4]["now"] += 601
+    watcher._store.pr("o/abc#7")["checked_at"] = 0
+    watcher.poll()
+    assert len(woken) == 2 and [k for k in watcher._store.peek("o/abc#7")["items"]] == [
+        "conflict:ff00ff00"
+    ]
+
+
+def test_an_aviator_blocked_comment_counts_as_a_conflict(rig, monkeypatch):
+    from cyclecontrol.comments import pr_state
+
+    bot = c(99, "aviator-app[bot]", "This PR has merge conflicts and was removed from the queue.")
+    watcher, _manager, _session, fake, woken = conflict_rig(
+        rig, monkeypatch, mergeable="UNKNOWN", comments=[bot]
+    )
+    fake.raw["labels"] = {"nodes": [{"name": "blocked"}]}
+    assert pr_state(fake.raw)["conflicting"] is True
+    watcher.poll()
+    assert len(woken) == 1
+    fake.raw["labels"] = {"nodes": []}
+    assert pr_state(fake.raw)["conflicting"] is False
+
+
+def test_an_old_style_conflict_needs_you_is_dispatched_and_answered_not_shown(rig, monkeypatch):
+    watcher, _manager, session, _fake, woken = conflict_rig(rig, monkeypatch)
+    watcher._store.record(
+        "o/abc#7",
+        [
+            ReviewItem(
+                "conflict:ef3763b7", "conflict", "GitHub", False, False, "old body", url="https://x"
+            )
+        ],
+    )
+    watcher._store.mark_delivered("o/abc#7")
+    watcher._store.set_state(
+        "o/abc#7", {"open": True, "head": "ef3763b7aa", "base": "develop", "conflicting": True}
+    )
+    (session.git_dir / "spp-comments.jsonl").write_text(
+        json.dumps(
+            {
+                "id": "conflict:ef3763b7",
+                "action": "needs_you",
+                "reply": "Say if I should rebase and resolve it.",
+                "at": "2026-10-19T10:00:00Z",
+            }
+        )
+        + "\n"
+    )
+    assert watcher.view(session)["needsYou"] == 1
+    watcher.tick()
+    assert len(woken) == 1 and "Resolve them yourself now" in woken[0][1]
+    view = watcher.view(session)
+    assert view["needsYou"] == 0 and view["items"][0]["state"] == "answered"
+    watcher.tick()
+    watcher.poll()
+    assert len(woken) == 1
+
+
+def test_a_contradiction_the_builder_raises_after_dispatch_stays_visible(rig, monkeypatch):
+    from datetime import UTC, datetime, timedelta
+
+    watcher, _manager, session, _fake, woken = conflict_rig(rig, monkeypatch)
+    watcher.poll()
+    assert len(woken) == 1
+    later = ((datetime.now(UTC) + timedelta(minutes=1)).replace(microsecond=0).isoformat()).replace(
+        "+00:00", "Z"
+    )
+    (session.git_dir / "spp-comments.jsonl").write_text(
+        json.dumps(
+            {
+                "id": "conflict:ef3763b7",
+                "action": "needs_you",
+                "reply": "Two intents contradict: (1) keep the new column (2) drop it",
+                "at": "2026-10-19T10:00:00Z",
+            }
+        )
+        + "\n"
+    )
+    watcher.tick()
+    view = watcher.view(session)
+    assert view["needsYou"] == 1 and len(woken) == 1
+    assert [o["label"] for o in view["items"][0]["options"]] == ["keep the new column", "drop it"]
+    watcher.answer_builder(session, "conflict:ef3763b7", "Go with option 1: keep the new column")
+    assert watcher.view(session)["needsYou"] == 0
+    (session.git_dir / "spp-comments.jsonl").write_text(
+        json.dumps(
+            {"id": "conflict:ef3763b7", "action": "needs_you", "reply": "Still unsure", "at": later}
+        )
+        + "\n"
+    )
+    assert watcher.view(session)["needsYou"] == 1
+
+
+def test_a_fixed_conflict_on_a_still_blocked_pr_shows_a_note_not_a_needs_you(rig, monkeypatch):
+    watcher, _manager, session, fake, _woken = conflict_rig(rig, monkeypatch, mergeable="MERGEABLE")
+    fake.raw["labels"] = {"nodes": [{"name": "blocked"}]}
+    watcher._store.record(
+        "o/abc#7",
+        [ReviewItem("conflict:ef3763b7", "conflict", "GitHub", False, False, "b", url="https://x")],
+    )
+    watcher._store.mark_delivered("o/abc#7")
+    watcher.poll()
+    (session.git_dir / "spp-comments.jsonl").write_text(
+        json.dumps({"id": "conflict:ef3763b7", "action": "fixed", "reply": "merged develop in"})
+        + "\n"
+    )
+    view = watcher.view(session)
+    assert view["needsYou"] == 0 and view["blockedNote"] == "blocked: not re-queued"
+    fake.raw["labels"] = {"nodes": [{"name": "mergequeue"}]}
+    watcher._store.pr("o/abc#7")["checked_at"] = 0
+    watcher.poll()
+    assert watcher.view(session)["blockedNote"] == ""
+
+
+def test_a_pr_in_a_sibling_repo_is_found_by_issue_title_and_polled_there(rig):
+    watcher, _manager, session, fake, _clock, _settings = rig
+    fetched = []
+    watcher._fetch = lambda repo, number: fetched.append((repo, number)) or fake.raw
+    watcher._find_pr = lambda repo, branch: (_ for _ in ()).throw(GithubError("none"))
+    watcher._find_by_issue = lambda owner, issue_id: ("Org/sibling", 99)
+    watcher.poll()
+    assert fetched == [("Org/sibling", 99)]
+    assert watcher._store.repos[session.issue.id] == "Org/sibling"
+    assert watcher._team_of(session).github_repo == "Org/sibling"
+
+
+def test_an_approval_that_only_points_at_its_inline_comments_asks_for_nothing():
+    raw = pr(
+        reviews=[
+            review(
+                40, "sam", "APPROVED", "Approve-leaning. Nice consolidation. A few nits inline."
+            ),
+            review(41, "lee", "APPROVED", "Two small non-blocking cleanups inline."),
+            review(
+                42,
+                "kim",
+                "APPROVED",
+                "Approving, but please regenerate the schema dump before merge.",
+            ),
+            review(43, "rio", "COMMENTED", "Nits inline."),
+        ]
+    )
+    _, items = parse_pr(raw)
+    assert keys(items) == ["r:42", "r:43"]
+
+
+def test_the_first_look_delivers_a_review_body_that_is_less_than_a_day_old(tmp_path):
+    from datetime import UTC, datetime, timedelta
+
+    store = CommentStore(tmp_path / "c.json")
+    now = datetime(2026, 10, 28, 14, 30, tzinfo=UTC)
+    fresh_review = review(50, "rio", "COMMENTED", "Not approving until the backfill is reworked")
+    fresh_review["submittedAt"] = (now - timedelta(minutes=40)).isoformat().replace("+00:00", "Z")
+    old = c(51, "sam", "old question", created=(now - timedelta(days=3)).isoformat())
+    _, items = parse_pr(pr(reviews=[fresh_review], comments=[old]))
+    assert keys(store.record("o/r#7", items, now.timestamp())) == ["r:50"]
+
+
+def test_the_feedback_file_never_names_ci_or_github_as_a_reviewer():
+    from cyclecontrol.comments import approval_line
+
+    items = [
+        ReviewItem("ci:abc12345", "ci", "CI", False, False, "CI is failing"),
+        ReviewItem("conflict:abc12345", "conflict", "GitHub", False, False, "conflicts"),
+        ReviewItem("t:1", "thread", "rio", False, False, "@rio: rename"),
+    ]
+    line = approval_line({"approved": False, "blocking": [], "approvers": []}, items)
+    assert "@rio" in line and "@CI" not in line and "@GitHub" not in line
+
+
+def test_codecov_is_not_ci():
+    from cyclecontrol.comments import effective_ci
+
+    rollup = {
+        "state": "FAILURE",
+        "contexts": {
+            "nodes": [
+                {"__typename": "StatusContext", "context": "codecov/patch", "state": "FAILURE"},
+                {
+                    "__typename": "CheckRun",
+                    "name": "ci/circleci: test-php",
+                    "status": "COMPLETED",
+                    "conclusion": "SUCCESS",
+                },
+            ]
+        },
+    }
+    assert effective_ci(rollup) == "SUCCESS"
+
+
+def test_a_conflicting_head_gets_a_conflict_item_and_no_ci_item(rig, monkeypatch):
+    from tests.test_approval import full_pr
+
+    watcher, manager, session, fake, _clock, _settings = rig
+    (session.git_dir / "spp-phase.json").write_text(json.dumps({"phase": "human"}))
+    fake.raw = full_pr(
+        headRefOid="ef3763b7aa",
+        mergeable="CONFLICTING",
+        commits={
+            "nodes": [
+                {
+                    "commit": {
+                        "oid": "ef3763b7aa",
+                        "statusCheckRollup": {
+                            "state": "FAILURE",
+                            "contexts": {
+                                "nodes": [
+                                    {
+                                        "__typename": "CheckRun",
+                                        "name": "ci/circleci: test-php-browser",
+                                        "status": "COMPLETED",
+                                        "conclusion": "FAILURE",
+                                    }
+                                ]
+                            },
+                        },
+                    }
+                }
+            ]
+        },
+    )
+    monkeypatch.setattr(manager, "wake", lambda *a, **k: "running")
+    watcher.poll()
+    items = list(watcher._store.pr("o/abc#7")["items"])
+    assert "conflict:ef3763b7" in items and "ci:ef3763b7" not in items
+
+
+def test_threads_opened_after_the_merge_are_announced_once_and_flags_are_dropped(rig):
+    watcher, _, _session, fake, _clock, _ = rig
+    told = []
+    watcher._notify = lambda title, msg: told.append((title, msg))
+    watcher._store.set_notified("needs:o/abc#7:t:1", True)
+    watcher._store.set_notified("ready:o/abc#7", False)
+    watcher._store.set_notified("requeue-try:o/abc#7:abc:1", True)
+    watcher._store.set_notified("ready:o/abc#8", True)
+    late = thread("T1", [c(1, "sam", "py-12 is hardcoded", created="2026-10-22T10:21:56Z")])
+    late["comments"]["nodes"][0]["url"] = "https://x/late"
+    early = thread("T2", [c(2, "sam", "older", created="2026-10-22T09:00:00Z")])
+    fake.raw = {**pr(threads=[late, early], state="MERGED"), "mergedAt": "2026-10-22T10:03:39Z"}
+    watcher.poll()
+    watcher.poll()
+    assert told == [("ABC-12 got 1 review thread after merging", "https://x/late")]
+    assert list(watcher._store.flags) == ["ready:o/abc#8", "late-threads:o/abc#7"]
+
+
+def test_delivery_writes_the_pr_pointer_for_the_reply_script(rig):
+    watcher, _, session, fake, _, _ = rig
+    fake.raw = pr(threads=[thread("T1", [c(1, "sam", "Rename")])])
+    watcher.poll()
+    watcher.tick()
+    assert json.loads((session.git_dir / "spp-pr.json").read_text()) == {
+        "repo": "o/abc",
+        "number": 7,
+    }
+
+
+def test_a_thread_on_the_stacked_pr_is_polled_delivered_and_shown(rig):
+    watcher, _, session, _fake, _clock, _ = rig
+    session.pty.tail = lambda: (
+        b"Backend: https://github.com/o/abc/pull/7\nFrontend, stacked: https://github.com/o/abc/pull/8\n"
+    )
+    raws = {7: pr(), 8: {**pr(), "number": 8}}
+    fetched = []
+
+    def fetch(repo, number):
+        fetched.append(number)
+        return raws[number]
+
+    watcher._fetch = fetch
+    assert watcher.poll() == [] and fetched == [7, 8]
+    assert watcher._store.stacked["ABC-12"] == [8]
+    raws[8] = {**pr(threads=[thread("T9", [c(9, "sam", "Guard the save")])]), "number": 8}
+    assert watcher.poll() == ["ABC-12"]
+    assert watcher._store.pending_items("o/abc#8") and not watcher._store.pending_items("o/abc#7")
+    session.pty.last_output = 0.0
+    assert watcher.tick() == ["ABC-12"]
+    assert "PR #8" in session.pty.sent[0].decode()
+    view = watcher.view(session)
+    assert [r["key"] for r in view["items"]] == ["t:9"] and view["waiting"] == 1
+    session.pty.tail = lambda: b""
+    watcher._store.save()
+    from cyclecontrol.comments import CommentStore
+
+    assert CommentStore(watcher._store._path).stacked == {"ABC-12": [8]}
+
+
+def test_a_stack_finishes_only_when_every_pr_in_it_is_closed(rig):
+    watcher, _manager, session, _fake, _clock, _ = rig
+    session.pty.tail = lambda: (
+        b"Backend: https://github.com/o/abc/pull/7\nFrontend: https://github.com/o/abc/pull/8\n"
+    )
+    raws = {7: pr(), 8: {**pr(), "number": 8}}
+    watcher._fetch = lambda repo, number: raws[number]
+    watcher.poll()
+    raws[7] = pr(state="MERGED")
+    raws[8] = {**pr(threads=[thread("T9", [c(9, "sam", "Guard the save")])]), "number": 8}
+    assert watcher.poll() == ["ABC-12"]
+    session.pty.last_output = 0.0
+    assert watcher.tick() == ["ABC-12"] and not session.finished
+    assert "PR #8" in session.pty.sent[0].decode()
+    raws[8] = {**pr(state="MERGED"), "number": 8}
+    watcher.poll()
+    watcher.tick()
+    assert session.finished
+
+
+def test_feedback_held_behind_a_busy_builder_reports_how_long_it_has_waited(rig):
+    watcher, _, session, fake, clock, _ = rig
+    fake.raw = pr(threads=[thread("T9", [c(9, "sam", "Guard the save")])])
+    watcher.poll()
+    assert watcher.view(session)["heldSince"] == 1000.0
+    clock["now"] = 1700.0
+    session.pty.last_output = time.time()
+    assert watcher.tick() == [] and watcher.view(session)["heldSince"] == 1000.0
+    session.pty.last_output = 0.0
+    watcher.tick()
+    assert watcher.view(session)["heldSince"] == 0
+
+
+def test_a_stacked_pr_that_becomes_ready_is_announced_with_its_number(rig):
+    watcher, _, session, _fake, _clock, _ = rig
+    session.pty.tail = lambda: (
+        b"Backend: https://github.com/o/abc/pull/7\nFrontend: https://github.com/o/abc/pull/8\n"
+    )
+    notes = []
+    watcher._notify = lambda title, message: notes.append((title, message))
+    ready = {
+        **pr(reviews=[{"author": {"login": "sam"}, "state": "APPROVED", "body": ""}]),
+        "number": 8,
+        "reviewDecision": "APPROVED",
+        "mergeable": "MERGEABLE",
+        "commits": {
+            "nodes": [
+                {
+                    "commit": {
+                        "oid": "abc",
+                        "statusCheckRollup": {"state": "SUCCESS", "contexts": {"nodes": []}},
+                    }
+                }
+            ]
+        },
+    }
+    raws = {7: pr(), 8: ready}
+    watcher._fetch = lambda repo, number: raws[number]
+    watcher.poll()
+    watcher.tick()
+    assert ("ABC-12 is ready to merge", "PR #8: " + session.issue.title) in notes
+
+
+class FakeCircle:
+    def __init__(self, infra=True):
+        self.enabled = True
+        self.infra = infra
+        self.reruns = []
+        self.reads = 0
+
+    def failure(self, repo, url):
+        from cyclecontrol.circleci import Failure
+
+        self.reads += 1
+        step = "Fetching merge base with develop" if self.infra else "Run jest"
+        tail = (
+            "fatal: shallow file has changed since we read it"
+            if self.infra
+            else "expected 1 to be 2"
+        )
+        return Failure("wf-1", "lint-js-style", step, tail)
+
+    def rerun_from_failed(self, wf):
+        self.reruns.append(wf)
+        return True
+
+
+def _red_pr(head="aef6849f0000"):
+    return {
+        **pr(),
+        "headRefOid": head,
+        "commits": {
+            "nodes": [
+                {
+                    "commit": {
+                        "oid": head,
+                        "statusCheckRollup": {
+                            "state": "FAILURE",
+                            "contexts": {
+                                "nodes": [
+                                    {
+                                        "__typename": "StatusContext",
+                                        "context": "ci/circleci: lint-js-style",
+                                        "state": "FAILURE",
+                                        "targetUrl": "https://app.circleci.com/workflow/wf-1/job/j-1",
+                                    },
+                                ]
+                            },
+                        },
+                    }
+                }
+            ]
+        },
+    }
+
+
+def _handed_over(session):
+    (session.git_dir / "spp-phase.json").write_text(json.dumps({"phase": "human"}))
+
+
+def test_an_infrastructure_ci_failure_is_re_run_twice_before_the_builder_hears_of_it(rig):
+    watcher, _, session, fake, _clock, _ = rig
+    circle = FakeCircle()
+    watcher._circleci = circle
+    _handed_over(session)
+    fake.raw = _red_pr()
+    assert watcher.poll() == [] and circle.reruns == ["wf-1"]
+    assert not watcher._store.pending_items("o/abc#7")
+    assert watcher._store.state_of("o/abc#7")["ciReruns"] == 1
+    assert watcher.view(session)["stage"]["headline"] == "CI is failing"
+    assert watcher.poll() == [] and circle.reruns == ["wf-1", "wf-1"]
+    assert watcher.poll() == ["ABC-12"] and circle.reruns == ["wf-1", "wf-1"]
+    [item] = watcher._store.pending_items("o/abc#7")
+    assert (
+        item.kind == "ci" and "already re-ran 2 times" in item.body and "shallow file" in item.body
+    )
+
+
+def test_a_real_test_failure_goes_straight_to_the_builder_and_the_log_is_read_once(rig):
+    watcher, _, session, fake, _clock, _ = rig
+    circle = FakeCircle(infra=False)
+    watcher._circleci = circle
+    _handed_over(session)
+    fake.raw = _red_pr()
+    assert watcher.poll() == ["ABC-12"] and circle.reruns == []
+    watcher.poll()
+    assert circle.reads == 1
+    [item] = watcher._store.pending_items("o/abc#7")
+    assert item.kind == "ci" and "already re-ran" not in item.body
+
+
+def test_a_pr_someone_else_opened_is_left_alone(rig):
+    watcher, _, _, fake, _, settings = rig
+    settings.github_login = "Owner"
+    fake.raw = pr(threads=[thread("T1", [c(1, "sam", "Rename this")])], author="matt")
+    assert watcher.poll() == []
+    assert watcher._store.pending_items("o/abc#7") == []
+    fake.raw = pr(threads=[thread("T1", [c(1, "sam", "Rename this")])], author="owner")
+    assert watcher.poll() == ["ABC-12"]
+
+
+def test_a_delivered_thread_already_resolved_on_github_is_not_counted_as_waiting():
+    item = {
+        "key": "t:1",
+        "kind": "thread",
+        "author": "coderabbitai",
+        "body": "fix it",
+        "thread_id": "PRRT_1",
+        "delivered_at": 1.0,
+    }
+    open_item = {**item, "key": "t:2", "thread_id": "PRRT_2"}
+    store_pr = {
+        "items": {"t:1": item, "t:2": open_item},
+        "pending": [],
+        "resolutions": {},
+        "resolved_threads": ["PRRT_1"],
+        "state": {"labels": [], "unresolved": 1},
+    }
+
+    view = comments_view(store_pr, {})
+
+    states = {row["key"]: row["state"] for row in view["items"]}
+    assert states == {"t:1": "answered", "t:2": "delivered"}
+    assert view["waiting"] == 1 and view["addressed"] == 1
+
+
+def test_drop_truncated_links_keeps_only_the_full_number():
+    from cyclecontrol.sessions import drop_truncated
+
+    base = "https://github.com/AgentSoftware/street/pull/"
+    assert drop_truncated([base + "36", base + "36269", base + "36306"]) == [
+        base + "36269",
+        base + "36306",
+    ]
+
+
+def test_a_new_head_is_judged_ready_afresh(rig):
+    from cyclecontrol.comments import pr_state
+    from tests.test_approval import full_pr
+
+    watcher, _, _session, _fake, _, _ = rig
+    notes = []
+    watcher._notify = lambda title, message: notes.append(title)
+    watcher.poll()
+    state = pr_state(full_pr())
+    watcher._store.set_state("o/abc#7", {**state, "head": "aaa"})
+    watcher.tick()
+    watcher.tick()
+    assert notes == ["ABC-12 is ready to merge"]
+    watcher._store.set_state("o/abc#7", {**state, "head": "bbb"})
+    watcher.tick()
+    assert notes == ["ABC-12 is ready to merge"] * 2
+
+
+def test_review_hand_offs_stop_after_three_rounds_and_tell_you_once(rig):
+    watcher, _, session, fake, _clock, _ = rig
+    notes = []
+    watcher._notify = lambda title, message: notes.append(title)
+    watcher.poll()
+    fake.raw = pr(threads=[thread("T1", [c(1, "sam", "Rename this")])])
+    watcher.poll()
+    session.pty.last_output = 0.0
+    watcher._store.set_notified("rounds:o/abc#7", 3)
+    assert watcher.tick() == [] and session.pty.sent == []
+    assert watcher.tick() == []
+    assert [n for n in notes if "3 review rounds" in n] == [
+        "ABC-12 needs you: 3 review rounds and still not clean"
+    ]
+
+
+def test_a_closed_pr_by_someone_else_is_recorded_so_the_ticket_can_finish(rig):
+    watcher, _, _, fake, _, settings = rig
+    settings.github_login = "Owner"
+    fake.raw = pr(state="CLOSED", author="matt")
+    watcher.poll()
+    state = watcher._store.state_of("o/abc#7")
+    assert state and state["open"] is False

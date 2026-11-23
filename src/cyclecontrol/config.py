@@ -51,16 +51,28 @@ class Settings(BaseSettings):
     waiting_after_seconds: int = 20
     port: int = 8770
     slack_channel_id: str = "C0C7J0A1S3B"
+    slack_team_domain: str = "agentsoftware"
+    slack_scan_seconds: int = 600
     merge_label: str = "mergequeue"
     state_file: str = "~/.cycle-control/sessions.json"
     teams_file: str = str(ROOT / "teams.json")
     max_builders: int = 3
+    max_live_builders: int = 6
+    park_after_seconds: int = 900
+    waiting_close_seconds: int = 3600
+    resume_all_on_launch: bool = False
     auto_rebase: bool = False
+    github_login: str = ""
+    keep_awake: bool = True
     auto_comments: bool = True
     auto_requeue: bool = True
+    auto_ci_rerun: bool = True
+    ci_reruns: int = 2
     auto_resolve: bool = True
     comment_poll_seconds: int = 300
     comments_file: str = "~/.cycle-control/comments.json"
+    journal_file: str = "~/.cycle-control/journal.jsonl"
+    log_file: str = "~/.cycle-control/cycle-control.log"
     rebase_poll_seconds: int = 60
     demo: bool = False
 
@@ -69,6 +81,14 @@ class Settings(BaseSettings):
     @property
     def state_path(self) -> Path:
         return Path(self.state_file).expanduser()
+
+    @property
+    def journal_path(self) -> Path:
+        return Path(self.journal_file).expanduser()
+
+    @property
+    def log_path(self) -> Path:
+        return Path(self.log_file).expanduser()
 
     @property
     def comments_path(self) -> Path:

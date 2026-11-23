@@ -3,10 +3,28 @@
 from __future__ import annotations
 
 import json
+import re
 from pathlib import Path
 from typing import Any
 
 from cyclecontrol.models import PlanStep, Progress
+
+PR_LINK = re.compile(r"https://github\.com/[\w.-]+/[\w.-]+/pull/\d+")
+
+FILES = ("spp-phase.json", "spp-plan.json", "spp-gates.json", "spp-review.json")
+
+
+def progress_stamp(git_dir: Path) -> tuple[tuple[int, int], ...]:
+    """Changes whenever one of the progress files does, so a reader can skip re-parsing them."""
+    stamp: list[tuple[int, int]] = []
+    for name in FILES:
+        try:
+            info = (git_dir / name).stat()
+        except OSError:
+            stamp.append((0, 0))
+            continue
+        stamp.append((info.st_mtime_ns, info.st_size))
+    return tuple(stamp)
 
 
 def _load(path: Path) -> dict[str, Any] | None:
@@ -48,7 +66,7 @@ def read_progress(git_dir: Path) -> Progress:
         review="none"
         if review is None
         else ("PASS" if review.get("verdict") == "PASS" else "CHANGES"),
-        pr_url=note if note.startswith("http") else "",
+        pr_url=" ".join(PR_LINK.findall(note)),
         gate_blocks=_strings((gates or {}).get("blocks")),
         gate_warns=_strings((gates or {}).get("warns")),
         review_findings=_strings((review or {}).get("findings")),

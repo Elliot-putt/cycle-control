@@ -37,27 +37,31 @@ class WorkWatcher:
     ) -> None:
         self._table = table
         self._clock = clock
-        self._cached: dict[int, tuple[float, bool]] = {}
+        self._read_at: float | None = None
+        self._children: dict[int, list[tuple[int, str]]] = {}
 
     def running(self, root: int) -> bool:
         if root <= 0:
             return False
-        hit = self._cached.get(root)
         now = self._clock()
-        if hit and now - hit[0] < CACHE_SECONDS:
-            return hit[1]
-        answer = self._look(root)
-        self._cached[root] = (now, answer)
-        return answer
+        if self._read_at is None or now - self._read_at >= CACHE_SECONDS:
+            self._children = self._snapshot()
+            self._read_at = now
+        return self._look(root)
 
-    def _look(self, root: int) -> bool:
+    def _snapshot(self) -> dict[int, list[tuple[int, str]]]:
+        """One process table shared by every builder, so the cost does not grow with the builder count."""
         try:
             rows = self._table()
         except (OSError, subprocess.SubprocessError):
-            return False
+            return {}
         children: dict[int, list[tuple[int, str]]] = {}
         for pid, parent, command in rows:
             children.setdefault(parent, []).append((pid, command))
+        return children
+
+    def _look(self, root: int) -> bool:
+        children = self._children
         stack = [root]
         seen = {root}
         while stack:

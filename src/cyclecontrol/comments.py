@@ -7,6 +7,7 @@ import logging
 import re
 import time
 from dataclasses import asdict, dataclass
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
@@ -25,10 +26,13 @@ PRAISE_ONLY = re.compile(
     re.IGNORECASE,
 )
 HTML_COMMENT = re.compile(r"<!--.*?-->", re.DOTALL)
-WALKTHROUGH_HINTS = ("auto-generated comment: summarize by coderabbit.ai", "walkthrough")
-REVIEW_BODY_SECTIONS = ("nitpick comments", "outside diff range", "duplicate comments")
 MAX_SEEN = 600
 MAX_ITEMS = 200
+FIRST_LOOK_FRESH_SECONDS = 24 * 3600
+INLINE_ONLY = re.compile(
+    r"^(?=.{0,240}$)(?!.*\b(?:please|could|should|would|worth|before merge|must|needs?)\b).*\b(?:inline|below|in the threads?)\b",
+    re.IGNORECASE | re.DOTALL,
+)
 
 
 DRAFT_PREFIX = re.compile(
@@ -40,6 +44,12 @@ DRAFT_PREFIX = re.compile(
 def clean_draft(text: str) -> str:
     """A drafted reply as it should read when posted: no "Draft reply (not posted):" label and no marker."""
     return DRAFT_PREFIX.sub("", text.replace(MARKER, ""), count=1).strip()
+
+
+def points_inline(body: str) -> bool:
+    """An approval body that only says its comments are inline asks for nothing itself."""
+    text = visible(body)
+    return bool(PRAISE_ONLY.match(text) or INLINE_ONLY.match(text))
 
 
 def visible(text: str) -> str:
@@ -106,25 +116,68 @@ def review_status(pr: dict[str, Any]) -> Approval:
     return Approval(bool(approvers) and not blocking, approvers, blocking)
 
 
-NOT_CI = ("aviator", "coderabbit", "auto-merge")
+NOT_CI = ("aviator", "coderabbit", "auto-merge", "codecov")
+REPO_MERGE_LABELS = {
+    "AgentSoftware/street": "Merge Queue: Good to Go",
+    "AgentSoftware/street-infra": "",
+}
+MERGE_LABELS = ("mergequeue", *(label for label in REPO_MERGE_LABELS.values() if label))
+
+
+def merge_label_for(repo: str, default: str = "mergequeue") -> str:
+    """The label Aviator watches in this repo, or "" where there is no merge queue."""
+    return REPO_MERGE_LABELS.get(repo, default)
+
+
+def queued(labels: list[str]) -> bool:
+    """Carries the label Aviator watches, whichever name this repo uses."""
+    return any(label in MERGE_LABELS for label in labels)
+
+
 FAILED = ("FAILURE", "ERROR", "TIMED_OUT", "CANCELLED", "ACTION_REQUIRED", "STARTUP_FAILURE")
 PASSED = ("SUCCESS", "NEUTRAL", "SKIPPED")
 
 
-def real_checks(rollup: dict[str, Any] | None) -> list[tuple[str, str]]:
-    """(name, verdict) of the checks that are really CI, in the order GitHub lists them."""
+def latest_checks(rollup: dict[str, Any] | None) -> list[dict[str, Any]]:
+    """One node per check name. A re-run GitHub Action leaves its cancelled older runs on the commit;
+    only the newest run of a name counts."""
     nodes = ((rollup or {}).get("contexts") or {}).get("nodes") or []
-    checks: list[tuple[str, str]] = []
+    newest: dict[str, dict[str, Any]] = {}
     for node in nodes:
         name = node.get("name") or node.get("context") or ""
         if any(skip in name.lower() for skip in NOT_CI):
             continue
-        if node.get("__typename") == "CheckRun":
-            result = node.get("conclusion") if node.get("status") == "COMPLETED" else "PENDING"
-        else:
-            result = node.get("state")
-        checks.append((name, result or "PENDING"))
-    return checks
+        current = newest.get(name)
+        if current is None or str(node.get("startedAt") or "") >= str(
+            current.get("startedAt") or ""
+        ):
+            newest[name] = node
+    return list(newest.values())
+
+
+def check_verdict(node: dict[str, Any]) -> str:
+    if node.get("__typename") == "CheckRun":
+        result = node.get("conclusion") if node.get("status") == "COMPLETED" else "PENDING"
+    else:
+        result = node.get("state")
+    return result or "PENDING"
+
+
+def real_checks(rollup: dict[str, Any] | None) -> list[tuple[str, str]]:
+    """(name, verdict) of the checks that are really CI, in the order GitHub lists them."""
+    return [
+        (n.get("name") or n.get("context") or "", check_verdict(n)) for n in latest_checks(rollup)
+    ]
+
+
+def check_links(rollup: dict[str, Any] | None) -> dict[str, str]:
+    """name -> the page behind each real check, for reading a failure or re-running it."""
+    return {
+        (n.get("name") or n.get("context") or ""): str(
+            n.get("targetUrl") or n.get("detailsUrl") or ""
+        )
+        for n in latest_checks(rollup)
+    }
 
 
 def effective_ci(rollup: dict[str, Any] | None) -> str:
@@ -141,6 +194,42 @@ def effective_ci(rollup: dict[str, Any] | None) -> str:
     return "SUCCESS" if verdicts else ""
 
 
+def aviator_conflict(pr: dict[str, Any]) -> bool:
+    """Aviator swapped mergequeue for blocked and said why: a conflict GitHub's mergeable may not show yet."""
+    labels = [n["name"] for n in (pr.get("labels") or {}).get("nodes", [])]
+    if "blocked" not in labels:
+        return False
+    return any(
+        "aviator" in _login(node).lower() and "conflict" in str(node.get("body", "")).lower()
+        for node in (pr.get("comments") or {}).get("nodes", [])
+    )
+
+
+def conflict_prompt(number: int, base: str) -> str:
+    """What the builder is told, with no human in the loop, when its PR conflicts with the base."""
+    return (
+        f"PR #{number} has merge conflicts with {base}. Resolve them yourself now: rebase onto origin/{base} (never merge it in), "
+        "keep the base's version and re-apply this PR's intent, run the touched tests, push with --force-with-lease, then run "
+        "~/.claude/spp/requeue.sh so Aviator re-queues it. Do not ask Elliot."
+    )
+
+
+def threads_after_merge(pr: dict[str, Any]) -> list[str]:
+    """Unresolved human threads opened on or after the merge: nobody is polling for them any more."""
+    merged_at = pr.get("mergedAt") or ""
+    if pr.get("state") != "MERGED" or not merged_at:
+        return []
+    found: list[str] = []
+    for thread in pr["reviewThreads"]["nodes"]:
+        comments = thread["comments"]["nodes"]
+        if thread["isResolved"] or not comments or _skip_bot(comments[0]):
+            continue
+        if is_coderabbit(_login(comments[0])) or (comments[0].get("createdAt") or "") < merged_at:
+            continue
+        found.append(comments[0].get("url") or f"t:{comments[0]['databaseId']}")
+    return found
+
+
 def pr_state(pr: dict[str, Any]) -> dict[str, Any]:
     """What the lane needs to know about a PR: approval, CI, unresolved threads and labels."""
     approval = review_status(pr)
@@ -153,16 +242,27 @@ def pr_state(pr: dict[str, Any]) -> dict[str, Any]:
         "mergedAt": pr.get("mergedAt") or "",
         "head": pr.get("headRefOid", ""),
         "draft": bool(pr.get("isDraft")),
-        "conflicting": pr.get("mergeable") == "CONFLICTING",
+        "conflicting": pr.get("mergeable") == "CONFLICTING" or aviator_conflict(pr),
+        "mergeable": pr.get("mergeable") or "",
         "base": pr.get("baseRefName", ""),
         "approved": approval.approved,
         "approvers": list(approval.approvers),
         "blocking": list(approval.blocking),
         "ci": rollup,
         "failing": [n for n, v in real_checks(checks) if v in FAILED],
+        "failingLinks": {
+            n: u
+            for n, u in check_links(checks).items()
+            if n in {f for f, v in real_checks(checks) if v in FAILED}
+        },
         "unresolved": sum(1 for t in pr["reviewThreads"]["nodes"] if not t["isResolved"]),
         "labels": [n["name"] for n in (pr.get("labels") or {}).get("nodes", [])],
     }
+
+
+def mergeability_pending(state: dict[str, Any]) -> bool:
+    """GitHub recomputes mergeability after a push or a base move and answers UNKNOWN meanwhile."""
+    return state.get("mergeable") == "UNKNOWN"
 
 
 def is_requeue_candidate(state: dict[str, Any] | None, needs_you: int = 0) -> bool:
@@ -178,6 +278,7 @@ def is_requeue_candidate(state: dict[str, Any] | None, needs_you: int = 0) -> bo
         and needs_you == 0
         and "blocked" in state.get("labels", [])
         and not state.get("conflicting")
+        and not mergeability_pending(state)
     )
 
 
@@ -193,9 +294,10 @@ def is_ready_to_merge(state: dict[str, Any] | None, needs_you: int = 0) -> bool:
         and state.get("unresolved", 1) == 0
         and state.get("ci") == "SUCCESS"
         and needs_you == 0
-        and "mergequeue" not in labels
+        and not queued(labels)
         and "blocked" not in labels
         and not state.get("conflicting")
+        and not mergeability_pending(state)
     )
 
 
@@ -224,7 +326,9 @@ def resolved_thread_ids(pr: dict[str, Any]) -> list[str]:
     return [t["id"] for t in pr["reviewThreads"]["nodes"] if t.get("isResolved") and t.get("id")]
 
 
-def ci_item(state: dict[str, Any], repo_url: str, number: int) -> ReviewItem | None:
+def ci_item(
+    state: dict[str, Any], repo_url: str, number: int, reruns: str = ""
+) -> ReviewItem | None:
     """A failed CI run on a PR whose builder has already handed over."""
     failing = state.get("failing") or []
     head = state.get("head", "")
@@ -232,7 +336,8 @@ def ci_item(state: dict[str, Any], repo_url: str, number: int) -> ReviewItem | N
         return None
     body = (
         f"CI is failing on {head[:8]}: {', '.join(failing)}.\n"
-        "Aviator merges develop into the branch after mergequeue, so this can be new develop code that clashes with this PR.\n"
+        + (f"{reruns}\n" if reruns else "")
+        + "Aviator merges develop into the branch after mergequeue, so this can be new develop code that clashes with this PR.\n"
         "Check the current state first: if CI is already green, record it as skipped. "
         "Otherwise read each failing job's log yourself (the circleci MCP get_build_failure_logs, or gh pr checks), fix it on your branch, "
         "run the fast gates, push with --force-with-lease, then run ~/.claude/spp/requeue.sh if the PR is blocked.\n"
@@ -257,11 +362,7 @@ def conflict_item(state: dict[str, Any], repo_url: str, number: int) -> ReviewIt
         return None
     base = state.get("base") or "the base branch"
     body = (
-        f"PR #{number} has merge conflicts with {base} (head {head[:8]}). A sibling PR in the stack usually landed first.\n"
-        f"Merge the base in, do not rebase or force-push, because the PR is already reviewed: `git fetch origin && git merge origin/{base}`.\n"
-        "If every conflicted file is markdown or docs (a skill, a README), keep both sides' additions, commit, run the fast gates and push, "
-        "then run ~/.claude/spp/requeue.sh if the PR is blocked. If any conflicted file is code, a lock file or you are not sure, "
-        "`git merge --abort` and leave it as a needs-you with the file names.\n"
+        f"{conflict_prompt(number, base)} (head {head[:8]})\n"
         f'Record it with `~/.claude/spp/comment.sh conflict:{head[:8]} fixed "<what you did>"`. It posts nothing to GitHub.'
     )
     return ReviewItem(
@@ -314,9 +415,7 @@ def parse_pr(pr: dict[str, Any]) -> tuple[PrFacts, list[ReviewItem]]:
     for comment in pr["comments"]["nodes"]:
         login = _login(comment)
         body = comment["body"]
-        if MARKER in body or _skip_bot(comment) or not body.strip():
-            continue
-        if is_coderabbit(login) and any(h in body[:800].lower() for h in WALKTHROUGH_HINTS):
+        if MARKER in body or _skip_bot(comment) or not body.strip() or is_coderabbit(login):
             continue
         items.append(
             ReviewItem(
@@ -337,11 +436,9 @@ def parse_pr(pr: dict[str, Any]) -> tuple[PrFacts, list[ReviewItem]]:
             MARKER in body
             or not body.strip()
             or review["state"] in ("DISMISSED", "PENDING")
-            or (review["state"] == "APPROVED" and PRAISE_ONLY.match(body.strip()))
-        ):
-            continue
-        if _skip_bot(review) or (
-            is_coderabbit(login) and not any(s in body.lower() for s in REVIEW_BODY_SECTIONS)
+            or (review["state"] == "APPROVED" and points_inline(body))
+            or _skip_bot(review)
+            or is_coderabbit(login)
         ):
             continue
         items.append(
@@ -368,7 +465,7 @@ def approval_line(state: dict[str, Any] | None, items: list[ReviewItem]) -> str:
     blocking = state.get("blocking", [])
     asked = [
         *blocking,
-        *[i.author for i in items if not i.is_owner and not i.is_coderabbit],
+        *[i.author for i in items if i.kind not in BUILDER_KINDS and not i.is_owner],
     ]
     names = ", ".join("@" + n for n in dict.fromkeys(asked))
     reason = (
@@ -443,6 +540,9 @@ class CommentStore:
             data = {}
         self._prs: dict[str, dict[str, Any]] = data.get("prs", {})
         self.numbers: dict[str, int] = data.get("numbers", {})
+        self.repos: dict[str, str] = data.get("repos", {})
+        self.stacked: dict[str, list[int]] = data.get("stacked", {})
+        self.others: dict[str, list[str]] = data.get("others", {})
         self.flags: dict[str, Any] = data.get("flags", {})
 
     def pr(self, key: str) -> dict[str, Any]:
@@ -459,7 +559,17 @@ class CommentStore:
     def save(self) -> None:
         self._path.parent.mkdir(parents=True, exist_ok=True)
         self._path.write_text(
-            json.dumps({"prs": self._prs, "numbers": self.numbers, "flags": self.flags}, indent=1)
+            json.dumps(
+                {
+                    "prs": self._prs,
+                    "numbers": self.numbers,
+                    "repos": self.repos,
+                    "stacked": self.stacked,
+                    "others": self.others,
+                    "flags": self.flags,
+                },
+                indent=1,
+            )
             + "\n"
         )
 
@@ -479,7 +589,7 @@ class CommentStore:
             if known:
                 continue
             seen.add(item.key)
-            if first and item.kind not in ("thread", "ci", "conflict"):
+            if first and item.kind not in ("thread", "ci", "conflict") and not _recent(item, now):
                 continue
             fresh.append(item)
         state["baselined"] = True
@@ -490,11 +600,13 @@ class CommentStore:
                 state["items"].pop(stale)
         return fresh
 
-    def discard_stale_ci(self, key: str, current: set[str]) -> None:
-        """A CI failure or conflict that no longer matches the PR head is not worth a builder's time."""
+    def discard_stale_ci(self, key: str, head: str) -> None:
+        """A CI failure or conflict from an older head is not worth a builder's time; one on the current head stays."""
         state = self.pr(key)
         stale = [
-            k for k in state["items"] if k.startswith(("ci:", "conflict:")) and k not in current
+            k
+            for k in state["items"]
+            if k.startswith(("ci:", "conflict:")) and k.split(":", 1)[1] != head[:8]
         ]
         for k in stale:
             state["items"].pop(k)
@@ -529,6 +641,16 @@ class CommentStore:
             if item_key in state["items"] and not state["items"][item_key].get("delivered_at"):
                 state["items"][item_key]["delivered_at"] = time.time()
 
+    def forget_flags(self, key: str) -> None:
+        """A PR that is no longer open needs none of its one-off notices."""
+        # Exact PR only: PR #36's flags must not match PR #36269's ("...#36" is a prefix of "...#36269").
+        for flag in [
+            f
+            for f in self.flags
+            if (rest := f.split(":", 1)[-1]) == key or rest.startswith(key + ":")
+        ]:
+            self.flags.pop(flag)
+
     def notified(self, flag: str) -> Any:
         return self.flags.get(flag)
 
@@ -551,6 +673,15 @@ class CommentStore:
             "at": time.time(),
             **extra,
         }
+
+
+def _recent(item: ReviewItem, now: float | None) -> bool:
+    """A comment or review body found on the first look is still feedback when it is less than a day old."""
+    try:
+        created = datetime.fromisoformat(item.created_at).timestamp()
+    except (ValueError, AttributeError):
+        return False
+    return (now or time.time()) - created < FIRST_LOOK_FRESH_SECONDS
 
 
 def read_actions(git_dir: Path) -> dict[str, dict[str, str]]:
@@ -592,7 +723,7 @@ def lane_label(state: dict[str, Any] | None, needs_you: int, requeue: dict[str, 
     if (
         requeue
         and requeue.get("status") == "requeued"
-        and "mergequeue" in labels
+        and queued(labels)
         and "blocked" not in labels
     ):
         return "re-queued"
@@ -600,7 +731,7 @@ def lane_label(state: dict[str, Any] | None, needs_you: int, requeue: dict[str, 
         return "re-queue refused"
     if ready:
         return "ready to merge"
-    if "mergequeue" in labels and "blocked" not in labels:
+    if queued(labels) and "blocked" not in labels:
         return "in merge queue"
     return ""
 
@@ -637,7 +768,13 @@ def review_stage(
         return {
             "tone": "need",
             "headline": f"Merge conflicts with {base}",
-            "next": "Aviator cannot merge it until they are resolved. The builder resolves a docs-only conflict itself and asks you about a code conflict.",
+            "next": "Aviator cannot merge it until they are resolved. The builder resolves them and re-queues the PR.",
+        }
+    if mergeability_pending(state):
+        return {
+            "tone": "wait",
+            "headline": "GitHub is still checking for conflicts",
+            "next": "It is re-checked within a minute.",
         }
     if needs_you:
         return {
@@ -670,21 +807,30 @@ def review_stage(
             "headline": f"{unresolved} thread{'s' if unresolved != 1 else ''} still open",
             "next": "Waiting for the threads to be resolved.",
         }
+    reruns = int(state.get("ciReruns") or 0)
     if ci == "failure":
         return {
             "tone": "need",
             "headline": "CI is failing",
-            "next": "The builder looks at the failing checks.",
+            "next": (
+                f"Re-run {reruns} time{'s' if reruns != 1 else ''} after an infrastructure failure. The builder looks at it now."
+                if reruns
+                else "The builder looks at the failing checks."
+            ),
         }
     if ci in ("pending", "expected"):
         return {
             "tone": "work",
-            "headline": "CI is running",
-            "next": "Waiting for the checks to finish. You can review meanwhile.",
+            "headline": "CI is re-running" if reruns else "CI is running",
+            "next": (
+                f"Attempt {reruns + 1} after an infrastructure failure. The builder gets it only if it fails again."
+                if reruns
+                else "Waiting for the checks to finish. You can review meanwhile."
+            ),
         }
-    queued = "mergequeue" in labels
+    in_queue = queued(labels)
     if not state.get("approved"):
-        if queued:
+        if in_queue:
             return {
                 "tone": "wait",
                 "headline": "Queued, waiting for a reviewer's approval",
@@ -695,7 +841,7 @@ def review_stage(
             "headline": "Ready for your review",
             "next": "Approve to add it to the merge queue, or request changes.",
         }
-    if queued and "blocked" not in labels:
+    if in_queue and "blocked" not in labels:
         return {
             "tone": "done",
             "headline": "In the merge queue",
@@ -732,6 +878,7 @@ def comments_view(
             "addressed": 0,
             "needsYou": 0,
             "waiting": 0,
+            "heldSince": 0,
             "items": [],
             "lane": "",
             "authors": [],
@@ -743,6 +890,13 @@ def comments_view(
     for key, item in store_pr["items"].items():
         action = actions.get(key, {})
         decision = store_pr["resolutions"].get(key)
+        if (
+            decision
+            and item.get("kind") in BUILDER_KINDS
+            and action
+            and _after(action.get("at", ""), decision.get("at", 0))
+        ):
+            decision = None
         if decision:
             state, reply = decision["state"], decision.get("reply", "")
         elif action:
@@ -753,6 +907,11 @@ def comments_view(
             state, reply = "queued", ""
         else:
             state, reply = "seen", ""
+        if state in ("queued", "delivered") and item.get("thread_id") in store_pr.get(
+            "resolved_threads", []
+        ):
+            # Resolved on GitHub (the builder, or you): nothing is waiting, whether or not it reported back.
+            state = "answered"
         rows.append(
             {
                 **{
@@ -761,7 +920,11 @@ def comments_view(
                     if k in item
                 },
                 "state": state,
+                "foundAt": float(item.get("found_at") or 0),
                 "reply": clean_draft(reply),
+                "options": builder_options(reply)
+                if item.get("kind") in BUILDER_KINDS and state == "needs_you"
+                else [],
                 "postedUrl": (decision or {}).get("posted_url", ""),
                 "resolved": bool((decision or {}).get("resolved")),
                 "githubResolved": bool(
@@ -771,6 +934,14 @@ def comments_view(
             }
         )
     relevant = [r for r in rows if r["state"] != "seen"]
+    labels = (store_pr.get("state") or {}).get("labels", [])
+    blocked_note = (
+        "blocked: not re-queued"
+        if "blocked" in labels
+        and not queued(labels)
+        and any(r["kind"] in BUILDER_KINDS and r["state"] == "fixed" for r in relevant)
+        else ""
+    )
     authors = list(
         dict.fromkeys(r["author"] for r in relevant if r["state"] in ("queued", "delivered"))
     )
@@ -787,13 +958,67 @@ def comments_view(
             requeue,
         ),
         "requeue": requeue,
+        "blockedNote": blocked_note,
         "addressed": sum(
-            1 for r in relevant if r["state"] in ("fixed", "replied", "skipped", "posted")
+            1
+            for r in relevant
+            if r["state"] in ("fixed", "replied", "skipped", "posted", "answered")
         ),
         "needsYou": sum(1 for r in relevant if r["state"] == "needs_you"),
         "waiting": sum(1 for r in relevant if r["state"] in ("queued", "delivered")),
+        "heldSince": min(
+            (r["foundAt"] for r in relevant if r["state"] == "queued" and r["foundAt"]), default=0
+        ),
         "items": sorted(relevant, key=lambda r: (r["state"] != "needs_you", r["key"])),
     }
 
 
 PR_URL = re.compile(r"/pull/(\d+)")
+BUILDER_KINDS = ("ci", "conflict")
+
+
+def merged_store_pr(
+    primary: dict[str, Any] | None, others: list[dict[str, Any] | None]
+) -> dict[str, Any] | None:
+    """The primary PR's record with the items of its stacked PRs folded in, so one view covers the stack."""
+    extra = [o for o in others if o]
+    if primary is None or not extra:
+        return primary
+    merged = dict(primary)
+    for field_name in ("items", "resolutions"):
+        merged[field_name] = {**primary.get(field_name, {})}
+        for other in extra:
+            merged[field_name].update(other.get(field_name, {}))
+    for field_name in ("pending", "resolved_threads"):
+        merged[field_name] = list(primary.get(field_name, []))
+        for other in extra:
+            merged[field_name] += [
+                x for x in other.get(field_name, []) if x not in merged[field_name]
+            ]
+    return merged
+
+
+def _after(stamp: str, epoch: float) -> bool:
+    """True when the builder's ISO timestamp is later than a decision taken at the epoch time."""
+    try:
+        return datetime.fromisoformat(stamp).timestamp() > float(epoch)
+    except (ValueError, TypeError):
+        return False
+
+
+OPTION_LINE = re.compile(r"^\s*\(?(\d+)[.)]\s+(.+?)\s*$")
+OPTION_INLINE = re.compile(r"\((\d+)\)\s*")
+
+
+def builder_options(text: str) -> list[dict[str, str]]:
+    """The numbered choices in a builder's needs-you note: one per line, or inline as (1) ... (2) ...."""
+    found = [OPTION_LINE.match(line) for line in text.splitlines()]
+    options = [{"key": m.group(1), "label": m.group(2)} for m in found if m]
+    if options:
+        return options
+    parts = OPTION_INLINE.split(text)
+    return [
+        {"key": parts[i], "label": parts[i + 1].strip().rstrip(".,;")}
+        for i in range(1, len(parts) - 1, 2)
+        if parts[i + 1].strip()
+    ]

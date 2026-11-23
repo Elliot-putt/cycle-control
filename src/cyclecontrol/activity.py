@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import html
 import json
 import re
 from datetime import datetime
@@ -12,6 +13,13 @@ MAX_ENTRIES = 300
 OPTION = re.compile(r"^\s*(\d+)[.)]\s+(.+?)\s*$")
 EXIT_CODE = re.compile(r"Exit code (\d+)")
 PASSED = re.compile(r"\b(\d+) passed\b")
+MEMORY_KILL = re.compile(
+    r"(?:running|critically) low on memory|\bOOMKilled\b|Exit code 137\b|exited with code 137\b",
+    re.IGNORECASE,
+)
+KILLED_COMMAND = re.compile(r'Background command "(.+?)" was stopped', re.DOTALL)
+TASK_NOTIFICATION = "<task-notification>"
+CARRIED_ON_AFTER_TOOLS = 5
 
 
 def project_dir(worktree: Path, home: Path | None = None) -> Path:
@@ -84,6 +92,8 @@ class TranscriptReader:
         self._asking: dict[str, dict[str, Any]] = {}
         self.last_event_at = ""
         self.last_say_open = False
+        self.memory_kill: dict[str, str] | None = None
+        self._tools_since_kill = 0
 
     def refresh(self) -> None:
         try:
@@ -102,6 +112,8 @@ class TranscriptReader:
             except ValueError:
                 continue
         del self.entries[:-MAX_ENTRIES]
+        for stale in list(self._calls)[: max(0, len(self._calls) - MAX_ENTRIES)]:
+            self._calls.pop(stale)
 
     def _group(self) -> dict[str, Any]:
         if self.entries and self.entries[-1]["kind"] == "tools":
@@ -145,6 +157,7 @@ class TranscriptReader:
         if isinstance(content, str) or not isinstance(content, list):
             self._asking.clear()
             self.last_say_open = False
+            self._user_text(content if isinstance(content, str) else "", stamp)
             return
         for block in content:
             if block.get("type") == "tool_result":
@@ -152,14 +165,42 @@ class TranscriptReader:
             elif block.get("type") == "text":
                 self._asking.clear()
                 self.last_say_open = False
+                self._user_text(str(block.get("text", "")), stamp)
+
+    def _user_text(self, text: str, stamp: str) -> None:
+        """A task notification saying Claude Code reaped a background command for low memory is a kill; any
+        other prompt (Elliot, or one of the app's own nudges) starts a new turn and clears the last one."""
+        if TASK_NOTIFICATION in text or "[SYSTEM NOTIFICATION" in text:
+            if MEMORY_KILL.search(text):
+                command = KILLED_COMMAND.search(text)
+                step = html.unescape(command.group(1)) if command else "a background command"
+                self._record_kill(step, stamp)
+            return
+        self.memory_kill = None
+
+    def _record_kill(self, step: str, stamp: str) -> None:
+        lines = step.strip().splitlines()
+        self.memory_kill = {"step": (lines[0] if lines else step)[:200], "at": stamp}
+        self._tools_since_kill = 0
 
     def _tool_result(self, block: dict[str, Any], stamp: str) -> None:
         use_id = str(block.get("tool_use_id"))
         self._asking.pop(use_id, None)
         found = self._calls.pop(use_id, None)
+        content = block.get("content")
+        killed = bool(
+            MEMORY_KILL.search(content if isinstance(content, str) else json.dumps(content))
+        )
+        if killed:
+            target = found["call"]["target"] if found else ""
+            self._record_kill(target or "a tool call", stamp)
+        elif self.memory_kill is not None:
+            self._tools_since_kill += 1
+            if self._tools_since_kill >= CARRIED_ON_AFTER_TOOLS:
+                self.memory_kill = None
         if not found:
             return
-        word, ok = _result_word(block.get("content"), bool(block.get("is_error")))
+        word, ok = _result_word(content, bool(block.get("is_error")))
         found["call"]["result"] = word
         found["call"]["ok"] = ok
         found["group"]["end"] = stamp or found["group"]["end"]

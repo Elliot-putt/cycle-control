@@ -33,7 +33,7 @@
             <div class="seg" id="startas"><button data-startas="plan">Plan</button><button data-startas="auto">Auto</button></div>
           </div>
         </div>
-        <div class="agentview-row"><div class="seg" id="agentview"><button data-agentview="open">Open</button><button data-agentview="merged">Merged</button></div></div>
+        <div class="agentview-row"><div class="seg" id="agentview"><button data-agentview="open">Open</button><button data-agentview="done">Done</button></div></div>
         <p id="error" class="err-text" hidden></p>
       </div>
       <div class="scroll" id="list"></div>
@@ -50,6 +50,7 @@
             <a class="ghost" id="m-linear" target="_blank">Linear ↗</a>
             <a class="ghost" id="m-pr" target="_blank" hidden>PR ↗</a>
             <button class="ghost" id="m-stop">Stop</button>
+            <button class="ghost danger" id="m-nuke">Nuke</button>
           </div>
           <div class="steps" id="m-steps"></div>
         </div>
@@ -66,6 +67,9 @@
       </section>
     </main>
   </div>
+
+  <div id="modal" class="modal" hidden></div>
+  <div id="toasts" class="toasts"></div>
 
   <script src="https://cdn.jsdelivr.net/npm/xterm@5.3.0/lib/xterm.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/xterm-addon-fit@0.8.0/lib/xterm-addon-fit.js"></script>

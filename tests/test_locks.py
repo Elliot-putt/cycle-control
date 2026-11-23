@@ -7,6 +7,7 @@ import pytest
 
 from cyclecontrol import locks
 from cyclecontrol import sessions as sessions_module
+from cyclecontrol.commentwatch import REVIVE_RETRY_SECONDS
 from cyclecontrol.locks import LOCK_NAME, BuilderLockedError, Procs
 from cyclecontrol.sessions import SessionManager
 from tests.test_comments import c, pr, thread
@@ -238,7 +239,7 @@ def comment_rig(tmp_path, monkeypatch):
 def test_an_ended_builder_is_not_resumed_while_its_old_process_is_still_there(
     tmp_path, monkeypatch
 ):
-    watcher, _manager, session, _clock = comment_rig(tmp_path, monkeypatch)
+    watcher, _manager, session, clock = comment_rig(tmp_path, monkeypatch)
     calls = []
     monkeypatch.setattr(
         SessionManager, "revive_for_comments", lambda self, *a: calls.append("resume") or "started"
@@ -246,10 +247,14 @@ def test_an_ended_builder_is_not_resumed_while_its_old_process_is_still_there(
     monkeypatch.setattr(locks.PROCS, "claude_running", lambda pid: pid == 800)
     (session.git_dir / LOCK_NAME).write_text('{"pid": 800, "issue": "ABC-12"}')
     watcher.tick()
+    clock["now"] += REVIVE_RETRY_SECONDS
     watcher.tick()
     assert calls == []
     monkeypatch.setattr(locks.PROCS, "claude_running", lambda pid: False)
     monkeypatch.setattr(locks.PROCS, "claude_pids_in", lambda path: [])
+    watcher.tick()
+    assert calls == []
+    clock["now"] += REVIVE_RETRY_SECONDS
     watcher.tick()
     assert calls == ["resume"]
 
@@ -286,7 +291,7 @@ def test_the_new_builder_waits_for_the_old_process_to_be_really_gone(tmp_path, m
 
 
 def test_a_locked_worktree_during_resume_is_retried_not_replaced(tmp_path, monkeypatch):
-    watcher, _manager, _session, _clock = comment_rig(tmp_path, monkeypatch)
+    watcher, _manager, _session, clock = comment_rig(tmp_path, monkeypatch)
     attempts = []
 
     def revive(self, *a):
@@ -300,4 +305,66 @@ def test_a_locked_worktree_during_resume_is_retried_not_replaced(tmp_path, monke
     monkeypatch.setattr(locks.PROCS, "claude_pids_in", lambda path: [])
     watcher.tick()
     watcher.tick()
+    assert len(attempts) == 1 and started == []
+    clock["now"] += REVIVE_RETRY_SECONDS
+    watcher.tick()
     assert len(attempts) == 2 and started == []
+
+
+class KillingProcs(FakeProcs):
+    def __init__(self, running=(), strays=(), can_kill=True):
+        super().__init__(running, strays)
+        self.can_kill = can_kill
+        self.killed = []
+
+    def kill(self, pid):
+        self.killed.append(pid)
+        if self.can_kill:
+            self.running.discard(pid)
+        return self.can_kill
+
+
+def test_end_own_kills_a_builder_this_app_left_behind_and_drops_its_lock(dirs):
+    git_dir, worktree = dirs
+    procs = KillingProcs(running={51788})
+    locks.acquire(git_dir, worktree, "SLM-1202", procs)
+    locks.set_pid(git_dir, 51788)
+    assert locks.end_own(git_dir, procs) == 51788
+    assert procs.killed == [51788] and not (git_dir / LOCK_NAME).exists()
+
+
+def test_end_own_leaves_another_apps_lock_and_a_builder_it_cannot_kill(dirs):
+    git_dir, _ = dirs
+    other = KillingProcs(running={1})
+    (git_dir / LOCK_NAME).write_text('{"pid": 1, "app": 1}')
+    assert locks.end_own(git_dir, other) == 0 and (git_dir / LOCK_NAME).exists()
+    stuck = KillingProcs(running={2}, can_kill=False)
+    (git_dir / LOCK_NAME).write_text(f'{{"pid": 2, "app": {os.getpid()}}}')
+    assert locks.end_own(git_dir, stuck) == 0 and (git_dir / LOCK_NAME).exists()
+    assert locks.end_own(git_dir, KillingProcs()) == 0
+
+
+def test_sleeping_a_builder_that_survives_terminate_kills_it_by_pid(start_rig, monkeypatch):
+    manager, git_dir, _ = start_rig
+    manager.start(issue("ABC-12", team="ABC"), "plan")
+    session = manager.get("ABC-12")
+    monkeypatch.setattr(session.pty, "terminate", lambda: None)
+    killed = []
+    monkeypatch.setattr(locks.PROCS, "claude_running", lambda pid: pid == 31337 and not killed)
+    monkeypatch.setattr(locks.PROCS, "kill", lambda pid: killed.append(pid) or True)
+    manager._sleep(session)
+    assert killed == [31337] and not (git_dir / LOCK_NAME).exists() and session.asleep
+
+
+def test_wake_reclaims_the_lock_of_a_builder_this_app_failed_to_end(start_rig, monkeypatch):
+    manager, git_dir, _ = start_rig
+    manager.start(issue("ABC-12", team="ABC"), "plan")
+    session = manager.get("ABC-12")
+    manager._sleep(session)
+    (git_dir / LOCK_NAME).write_text(f'{{"pid": 31337, "app": {os.getpid()}}}')
+    alive = {31337}
+    monkeypatch.setattr(locks.PROCS, "claude_running", lambda pid: pid in alive)
+    monkeypatch.setattr(locks.PROCS, "kill", lambda pid: alive.discard(pid) or True)
+    monkeypatch.setattr(sessions_module, "newest_transcript", lambda *a: None)
+    assert manager.wake("ABC-12") == "started"
+    assert manager.get("ABC-12").pty.is_alive() and locks._read(git_dir)["pid"] == 31337

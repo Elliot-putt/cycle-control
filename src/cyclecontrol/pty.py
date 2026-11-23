@@ -13,7 +13,7 @@ import ptyprocess
 
 logger = logging.getLogger(__name__)
 
-MAX_SCROLLBACK_BYTES = 512 * 1024
+MAX_SCROLLBACK_BYTES = 256 * 1024
 ANSI = re.compile(
     rb"\x1b\[[0-?]*[ -/]*[@-~]|\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)|\x1b[()][A-Za-z0-9]|\x1b[=>]"
 )
@@ -111,5 +111,56 @@ class PtySession:
             return None
         return self._proc.exitstatus if self._proc.exitstatus is not None else 1
 
+    def exit_signal(self) -> int | None:
+        """The signal that ended the process, or None while running or after a normal exit.
+        macOS's low-memory killer (jetsam) sends SIGKILL, which a shell would report as exit 137."""
+        if self._proc is None or self._proc.isalive():
+            return None
+        return self._proc.signalstatus
+
     def tail(self, limit: int = 6000) -> bytes:
-        return b"".join(self.scrollback)[-limit:]
+        parts: list[bytes] = []
+        size = 0
+        with self._fan_lock:
+            for chunk in reversed(self.scrollback):
+                parts.append(chunk)
+                size += len(chunk)
+                if size >= limit:
+                    break
+        return b"".join(reversed(parts))[-limit:]
+
+
+class SleepingPty:
+    """Stands in for a builder that is not running: same surface as PtySession, no process, no scrollback."""
+
+    def __init__(self) -> None:
+        self.scrollback: list[bytes] = []
+        self.last_output = time.time()
+        self.pid = 0
+
+    def attach(self, reader: Callable[[bytes], None]) -> list[bytes]:
+        return []
+
+    def detach(self, reader: Callable[[bytes], None]) -> None:
+        pass
+
+    def write(self, data: bytes) -> None:
+        pass
+
+    def resize(self, rows: int, cols: int) -> None:
+        pass
+
+    def is_alive(self) -> bool:
+        return False
+
+    def terminate(self) -> None:
+        pass
+
+    def exit_status(self) -> int | None:
+        return None
+
+    def exit_signal(self) -> int | None:
+        return None
+
+    def tail(self, limit: int = 6000) -> bytes:
+        return b""

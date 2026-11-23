@@ -49,3 +49,19 @@ def test_an_idle_builder_with_work_running_still_reads_as_working():
     assert health_of(True, "gates", 300, 20, busy=True) == "working"
     assert health_of(True, "gates", 300, 20, busy=False) == "waiting"
     assert health_of(True, "human", 300, 20, busy=True) == "waiting"
+
+
+def test_one_process_table_serves_every_builder():
+    now = [0.0]
+    calls = []
+
+    def counting():
+        calls.append(1)
+        return [(10, 1, "claude"), (11, 10, "just lint"), (20, 1, "claude")]
+
+    watcher = WorkWatcher(counting, lambda: now[0])
+    assert watcher.running(10) is True and watcher.running(20) is False
+    assert len(calls) == 1
+    now[0] = 6.0
+    watcher.running(20)
+    assert len(calls) == 2

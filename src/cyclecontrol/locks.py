@@ -3,13 +3,17 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
+import signal
 import subprocess
 import time
 from pathlib import Path
 
 LOCK_NAME = "spp-builder.lock"
 PENDING_SECONDS = 120
+KILL_WAIT_SECONDS = 3.0
+logger = logging.getLogger(__name__)
 
 
 class BuilderLockedError(RuntimeError):
@@ -35,6 +39,21 @@ class Procs:
             return False
         stat, _, command = line.partition(" ")
         return not stat.startswith("Z") and "claude" in command
+
+    def kill(self, pid: int) -> bool:
+        """SIGKILL the pid and wait for it to go. True once it is gone."""
+        try:
+            os.kill(pid, signal.SIGKILL)
+        except ProcessLookupError:
+            return True
+        except PermissionError:
+            return False
+        deadline = time.time() + KILL_WAIT_SECONDS
+        while time.time() < deadline:
+            if not self.claude_running(pid):
+                return True
+            time.sleep(0.1)
+        return not self.claude_running(pid)
 
     def claude_pids_in(self, worktree: Path) -> list[int]:
         """Claude processes whose working directory is the worktree, whoever started them."""
@@ -139,6 +158,25 @@ def release(git_dir: Path, pid: int | None = None) -> None:
         return
     if pid is None or int(lock.get("pid", 0)) in (pid, 0):
         (git_dir / LOCK_NAME).unlink(missing_ok=True)
+
+
+def end_own(git_dir: Path, procs: Procs = PROCS) -> int:
+    """Kill a builder this app started but failed to end, and drop its lock. Returns the pid killed, else 0.
+
+    A lock stamped with this app's pid whose builder is still alive after the app let go of it is ours to
+    clean up: nobody else can be using that process."""
+    lock = _read(git_dir)
+    if lock is None or int(lock.get("app", 0)) != os.getpid():
+        return 0
+    pid = int(lock.get("pid", 0))
+    killed = 0
+    if pid > 0 and procs.claude_running(pid):
+        if not procs.kill(pid):
+            logger.warning("Could not end builder pid %s in %s", pid, git_dir)
+            return 0
+        killed = pid
+    (git_dir / LOCK_NAME).unlink(missing_ok=True)
+    return killed
 
 
 def confirm_gone(git_dir: Path, worktree: Path, procs: Procs = PROCS) -> tuple[bool, str]:

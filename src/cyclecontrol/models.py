@@ -47,6 +47,10 @@ class Issue:
         return self.status_type not in ("completed", "canceled")
 
     @property
+    def is_cancelled(self) -> bool:
+        return self.status_type == "canceled"
+
+    @property
     def is_started(self) -> bool:
         return self.status_type == "started"
 

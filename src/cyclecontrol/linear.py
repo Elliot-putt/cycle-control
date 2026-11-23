@@ -15,6 +15,7 @@ from cyclecontrol.models import Blocker, Cycle, Issue
 
 logger = logging.getLogger(__name__)
 
+TIMEOUT = 60
 API_URL = "https://api.linear.app/graphql"
 
 ISSUE_FIELDS = """
@@ -25,6 +26,7 @@ fragment IssueFields on Issue {
   children(first: 1) { nodes { identifier } }
   state { name type }
   assignee { id name }
+  inverseRelations(first: 4) { nodes { type issue { identifier state { type } } } }
 }
 """
 
@@ -72,6 +74,12 @@ mutation Move($id: String!, $state: String!) {
 """
 
 
+UNASSIGN_MUTATION = """
+mutation Unassign($id: String!) {
+  issueUpdate(id: $id, input: {assigneeId: null}) { success }
+}
+"""
+
 IDENTIFIER = re.compile(r"^[A-Za-z0-9]+-\d+$")
 
 
@@ -94,6 +102,8 @@ def merge_family(issues: list[Issue], family: dict[str, Any], mine_ids: set[str]
             continue
         for raw in [node, *node.get("children", {}).get("nodes", [])]:
             fresh = _issue(raw, False, mine_ids)
+            if fresh.is_cancelled:
+                continue
             current = by_id.get(fresh.id)
             if current is None:
                 by_id[fresh.id] = replace(fresh, has_children=raw is node)
@@ -148,7 +158,11 @@ def parse_dashboard(
     cycle: Cycle | None = None
     if cycle_nodes:
         raw = cycle_nodes[0]
-        cycle_issues = [_issue(n, True, mine_ids) for n in raw["issues"]["nodes"]]
+        cycle_issues = [
+            i
+            for i in (_issue(n, True, mine_ids) for n in raw["issues"]["nodes"])
+            if not i.is_cancelled
+        ]
         ends = datetime.fromisoformat(raw["endsAt"])
         cycle = Cycle(
             number=raw["number"],
@@ -169,11 +183,18 @@ class LinearClient:
         self._http = httpx.Client(
             base_url=API_URL,
             headers={"Authorization": api_key, "Content-Type": "application/json"},
-            timeout=30,
+            timeout=TIMEOUT,
         )
 
     def _post(self, query: str, variables: dict[str, Any]) -> dict[str, Any]:
-        response = self._http.post("", json={"query": query, "variables": variables})
+        """Linear answers in well under a second most of the time and then stalls for half a minute in bursts,
+        so one timeout gets a second try before the board is left stale."""
+        payload = {"query": query, "variables": variables}
+        try:
+            response = self._http.post("", json=payload)
+        except httpx.TimeoutException:
+            logger.warning("Linear did not answer within %s s, trying once more", TIMEOUT)
+            response = self._http.post("", json=payload)
         if response.status_code == 401:
             raise LinearError("Linear rejected the API key.")
         response.raise_for_status()
@@ -201,3 +222,9 @@ class LinearClient:
             return
         first = min(states, key=lambda s: s["position"])
         self._post(UPDATE_MUTATION, {"id": issue_id, "state": first["id"]})
+
+    def unassign(self, issue_id: str) -> None:
+        """Take the assignee off the issue. Its status is left alone."""
+        data = self._post(UNASSIGN_MUTATION, {"id": issue_id})
+        if not (data.get("issueUpdate") or {}).get("success"):
+            raise LinearError(f"Linear did not unassign {issue_id}.")

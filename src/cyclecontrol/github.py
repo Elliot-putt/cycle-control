@@ -18,13 +18,27 @@ class PullRequest:
     url: str
     is_draft: bool
     labels: list[str]
+    base: str = ""
 
 
 def _gh(*args: str) -> str:
-    result = subprocess.run(["gh", *args], check=False, capture_output=True, text=True, timeout=60)
+    try:
+        result = subprocess.run(
+            ["gh", *args], check=False, capture_output=True, text=True, timeout=60
+        )
+    except subprocess.TimeoutExpired as slow:
+        raise GithubError(f"gh {args[0]} timed out after 60 s") from slow
     if result.returncode != 0:
         raise GithubError(result.stderr.strip() or "gh failed")
     return result.stdout
+
+
+def viewer_login() -> str:
+    """The GitHub login gh runs as. Empty when it cannot be read, so callers treat every PR as theirs."""
+    try:
+        return _gh("api", "user", "-q", ".login").strip()
+    except GithubError:
+        return ""
 
 
 def find_open_pr(repo: str, branch: str) -> PullRequest:
@@ -40,7 +54,7 @@ def find_open_pr(repo: str, branch: str) -> PullRequest:
         "--limit",
         "1",
         "--json",
-        "number,title,url,isDraft,labels",
+        "number,title,url,isDraft,labels,baseRefName",
     )
     found = json.loads(out)
     if not found:
@@ -52,11 +66,84 @@ def find_open_pr(repo: str, branch: str) -> PullRequest:
         pr["url"],
         pr["isDraft"],
         [label["name"] for label in pr["labels"]],
+        pr.get("baseRefName", ""),
+    )
+
+
+def find_pr_by_issue(owner: str, issue_id: str) -> tuple[str, int] | None:
+    """A PR in any repo of the owner whose title names the issue, for builders that work in a sibling repo."""
+    out = _gh(
+        "search",
+        "prs",
+        issue_id,
+        "--owner",
+        owner,
+        "--match",
+        "title",
+        "--json",
+        "number,title,repository,updatedAt",
+        "--limit",
+        "10",
+    )
+    named = [pr for pr in json.loads(out) if f"[{issue_id}]" in pr["title"]]
+    if not named:
+        return None
+    latest = max(named, key=lambda pr: pr["updatedAt"])
+    return latest["repository"]["nameWithOwner"], latest["number"]
+
+
+def find_prs_by_issue(owner: str, issue_id: str) -> list[tuple[str, int]]:
+    """Every PR in any repo of the owner whose title names the issue: a ticket can span street, consumer-v3 and infra."""
+    out = _gh(
+        "search",
+        "prs",
+        issue_id,
+        "--owner",
+        owner,
+        "--author",
+        "@me",
+        "--match",
+        "title",
+        "--json",
+        "number,title,repository",
+        "--limit",
+        "20",
+    )
+    return [
+        (pr["repository"]["nameWithOwner"], pr["number"])
+        for pr in json.loads(out)
+        if f"[{issue_id}]" in pr["title"]
+    ]
+
+
+def get_pr(repo: str, number: int) -> PullRequest:
+    out = _gh(
+        "pr",
+        "view",
+        str(number),
+        "--repo",
+        repo,
+        "--json",
+        "number,title,url,isDraft,labels,baseRefName",
+    )
+    pr = json.loads(out)
+    return PullRequest(
+        pr["number"],
+        pr["title"],
+        pr["url"],
+        pr["isDraft"],
+        [label["name"] for label in pr["labels"]],
+        pr.get("baseRefName", ""),
     )
 
 
 def add_label(repo: str, number: int, label: str) -> None:
     _gh("pr", "edit", str(number), "--repo", repo, "--add-label", label)
+
+
+def close_pr(repo: str, number: int) -> None:
+    """Close a PR without deleting its branch."""
+    _gh("pr", "close", str(number), "--repo", repo)
 
 
 def find_pr_any_state(repo: str, branch: str) -> PrState | None:
@@ -102,8 +189,8 @@ query($owner: String!, $repo: String!, $number: Int!) {
       labels(first: 30) { nodes { name } }
       commits(last: 1) { nodes { commit { oid statusCheckRollup { state contexts(first: 100) { nodes {
         __typename
-        ... on CheckRun { name status conclusion }
-        ... on StatusContext { context state }
+        ... on CheckRun { name status conclusion startedAt detailsUrl }
+        ... on StatusContext { context state targetUrl }
       } } } } } }
       reviewThreads(first: 100) { nodes { id isResolved isOutdated path line
         comments(first: 30) { nodes { databaseId author { login __typename } body url createdAt } } } }
