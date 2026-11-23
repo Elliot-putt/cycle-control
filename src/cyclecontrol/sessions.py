@@ -126,6 +126,10 @@ def screen_text(raw: bytes) -> str:
 PR_LINK = re.compile(r"https://github\.com/[\w.-]+/[\w.-]+/pull/\d+")
 
 
+RESTORE_LOCK_WAIT_SECONDS = 30.0
+RESTORE_LOCK_RETRY_SECONDS = 1.0
+
+
 class UnmappedTeamError(RuntimeError):
     pass
 
@@ -754,6 +758,32 @@ class SessionManager:
         phase = read_progress(self._git_dir_or_default(worktree)).phase
         return "sleep" if phase == "human" else "resume"
 
+    def _resume_saved(self, entry: dict, issue: Issue) -> str:
+        """Resume one saved builder. After a restart its old process can linger for a few seconds
+        still holding the worktree lock, so a locked worktree is retried before giving up."""
+        deadline = time.monotonic() + RESTORE_LOCK_WAIT_SECONDS
+        while True:
+            try:
+                return self.request_start(
+                    issue,
+                    entry.get("mode", "plan"),
+                    base=entry.get("base", ""),
+                    resume=True,
+                    flags=entry,
+                    prompt=RESUME_NOTE,
+                )
+            except locks.BuilderLockedError:
+                if time.monotonic() >= deadline:
+                    raise
+                time.sleep(RESTORE_LOCK_RETRY_SECONDS)
+
+    def _keep_saved(self, entry: dict) -> None:
+        """A builder that could not resume keeps its row, asleep, so it is not lost from the panel."""
+        try:
+            self._register_saved(entry, Issue.from_dict(entry["issue"]))
+        except Exception:
+            logger.exception("Could not keep %s", entry.get("issue", {}).get("id"))
+
     def restore(self) -> list[str]:
         """Resume the builders that were working when the app last closed; the rest come back asleep."""
         if self._settings.demo:
@@ -767,16 +797,10 @@ class SessionManager:
                 if self._restore_kind(entry, issue) != "resume":
                     self._register_saved(entry, issue)
                     continue
-                outcome = self.request_start(
-                    issue,
-                    entry.get("mode", "plan"),
-                    base=entry.get("base", ""),
-                    resume=True,
-                    flags=entry,
-                    prompt=RESUME_NOTE,
-                )
+                outcome = self._resume_saved(entry, issue)
             except Exception:
                 logger.exception("Could not resume %s", entry.get("issue", {}).get("id"))
+                self._keep_saved(entry)
                 continue
             session = self._sessions.get(issue.id)
             if outcome == "started" and session:

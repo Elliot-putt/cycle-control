@@ -903,3 +903,41 @@ def test_a_pr_link_the_terminal_wrapped_mid_number_is_not_read_as_a_second_pr():
         pty=SimpleNamespace(tail=lambda: f"{base}36\n{base}36269 and {base}41".encode())
     )
     assert sessions.Session.pr_urls_from_chat(fake) == [f"{base}36269", f"{base}41"]
+
+
+def test_restore_retries_a_locked_worktree_then_resumes(tmp_path, monkeypatch):
+    from cyclecontrol import locks
+    from cyclecontrol import sessions as sessions_module
+
+    settings = settings_for(tmp_path, max_builders=3)
+    write_registry(settings.state_path, saved_entries(tmp_path, {"PP-2": "execute"}), [])
+    manager = SessionManager(settings)
+    monkeypatch.setattr(sessions_module, "RESTORE_LOCK_RETRY_SECONDS", 0)
+    calls = []
+
+    def flaky(*args, **kwargs):
+        calls.append(1)
+        if len(calls) < 3:
+            raise locks.BuilderLockedError("held by an old process")
+        return "started"
+
+    monkeypatch.setattr(manager, "request_start", flaky)
+    assert manager.restore() == ["PP-2"] and len(calls) == 3
+
+
+def test_restore_keeps_a_builder_that_stays_locked_instead_of_dropping_it(tmp_path, monkeypatch):
+    from cyclecontrol import locks
+    from cyclecontrol import sessions as sessions_module
+
+    settings = settings_for(tmp_path, max_builders=3)
+    write_registry(settings.state_path, saved_entries(tmp_path, {"PP-2": "execute"}), [])
+    manager = SessionManager(settings)
+    monkeypatch.setattr(sessions_module, "RESTORE_LOCK_WAIT_SECONDS", 0)
+
+    def locked(*args, **kwargs):
+        raise locks.BuilderLockedError("held")
+
+    monkeypatch.setattr(manager, "request_start", locked)
+    assert manager.restore() == []
+    kept = manager.get("PP-2")
+    assert kept is not None and kept.asleep
