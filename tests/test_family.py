@@ -116,6 +116,7 @@ def test_a_pr_in_another_repo_than_the_teams_still_counts_as_open(tmp_path, monk
         return None
 
     monkeypatch.setattr(family_module, "find_pr_any_state", fake_find)
+    monkeypatch.setattr(family_module, "find_pr_by_number", lambda repo, number: None)
     svc.refresh()
     (group,) = svc.groups()
     child = next(c for c in group["children"] if c["id"] == "ABC-11")
@@ -143,7 +144,32 @@ def test_a_finished_builder_with_no_link_is_found_in_the_known_repos(tmp_path, m
         return None
 
     monkeypatch.setattr(family_module, "find_pr_any_state", fake_find)
+    monkeypatch.setattr(family_module, "find_pr_by_number", lambda repo, number: None)
     svc.refresh()
     (group,) = svc.groups()
     child = next(c for c in group["children"] if c["id"] == "ABC-11")
     assert child["kind"] == "done" and child["prNumber"] == 5
+
+
+def test_a_pr_on_a_differently_named_branch_is_found_by_its_recorded_number(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+
+    from cyclecontrol import family as family_module
+    from cyclecontrol.github import PrState
+
+    svc, sessions, _ = build(
+        tmp_path, [item("ABC-10", children=True), item("ABC-11", parent="ABC-10")]
+    )
+    url = "https://github.com/AgentSoftware/street/pull/36646"
+    session = SimpleNamespace(labelled=[url], pr_urls=list)
+    monkeypatch.setattr(sessions, "get", lambda issue_id: session)
+    monkeypatch.setattr(family_module, "find_pr_any_state", lambda repo, branch: None)
+    monkeypatch.setattr(
+        family_module,
+        "find_pr_by_number",
+        lambda repo, number: PrState(number, url, "abc/abc-11-street", "OPEN", "develop", "s"),
+    )
+    svc.refresh()
+    (group,) = svc.groups()
+    child = next(c for c in group["children"] if c["id"] == "ABC-11")
+    assert child["kind"] == "pr_open" and child["prNumber"] == 36646

@@ -10,7 +10,7 @@ from typing import Any
 from cyclecontrol.board import Board
 from cyclecontrol.comments import REPO_MERGE_LABELS
 from cyclecontrol.config import Settings, TeamConfig
-from cyclecontrol.github import GithubError, find_pr_any_state
+from cyclecontrol.github import GithubError, PrState, find_pr_any_state, find_pr_by_number
 from cyclecontrol.models import Issue
 from cyclecontrol.sessions import SessionManager
 from cyclecontrol.stacks import (
@@ -57,9 +57,9 @@ class FamilyService:
             plan = self._read_plan(team, parent)
             self._plans[parent.id] = plan
             for child_id, branch in branches_to_check(children, plan).items():
-                found = None
+                found = self._recorded_pr(child_id)
                 failed = False
-                for repo in self._repos_for(child_id, team.github_repo):
+                for repo in [] if found else self._repos_for(child_id, team.github_repo):
                     try:
                         found = find_pr_any_state(repo, branch)
                     except GithubError:
@@ -82,6 +82,23 @@ class FamilyService:
                     if found
                     else None
                 )
+
+    def _recorded_pr(self, issue_id: str) -> PrState | None:
+        """The PR the builder opened, found by number: its branch may not be the Linear one
+        (SLM-1718's PR is on feature/slm-1718-street), so a search by branch misses it."""
+        session = self._sessions.get(issue_id)
+        if session is None:
+            return None
+        urls = list(session.labelled)
+        try:
+            urls += session.pr_urls()
+        except (OSError, ValueError):
+            logger.debug("No PR links readable for %s", issue_id)
+        for url in reversed(list(dict.fromkeys(urls))):
+            match = re.match(r"https://github\.com/([\w.-]+/[\w.-]+)/pull/(\d+)$", url)
+            if match and (found := find_pr_by_number(match.group(1), int(match.group(2)))):
+                return found
+        return None
 
     def _repos_for(self, issue_id: str, team_repo: str) -> list[str]:
         """The team's repo first, then any other repo a PR of this ticket was seen in.

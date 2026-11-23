@@ -171,6 +171,26 @@ def find_pr_any_state(repo: str, branch: str) -> PrState | None:
     )
 
 
+def find_pr_by_number(repo: str, number: int) -> PrState | None:
+    """One PR by number, whatever its head branch is called; None when it does not exist."""
+    try:
+        out = _gh(
+            "pr",
+            "view",
+            str(number),
+            "--repo",
+            repo,
+            "--json",
+            "number,url,headRefName,state,baseRefName,headRefOid",
+        )
+    except GithubError:
+        return None
+    pr = json.loads(out)
+    return PrState(
+        pr["number"], pr["url"], pr["headRefName"], pr["state"], pr["baseRefName"], pr["headRefOid"]
+    )
+
+
 @dataclass(frozen=True)
 class PrState:
     number: int
