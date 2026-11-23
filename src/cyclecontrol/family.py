@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 from typing import Any
 
 from cyclecontrol.board import Board
@@ -55,10 +56,18 @@ class FamilyService:
             plan = self._read_plan(team, parent)
             self._plans[parent.id] = plan
             for child_id, branch in branches_to_check(children, plan).items():
-                try:
-                    found = find_pr_any_state(team.github_repo, branch)
-                except GithubError:
-                    logger.warning("Could not look up the PR for %s", branch)
+                found = None
+                failed = False
+                for repo in self._repos_for(child_id, team.github_repo):
+                    try:
+                        found = find_pr_any_state(repo, branch)
+                    except GithubError:
+                        logger.warning("Could not look up the PR for %s in %s", branch, repo)
+                        failed = True
+                        continue
+                    if found:
+                        break
+                if failed and not found:
                     continue
                 self._prs[child_id] = (
                     PrInfo(
@@ -72,6 +81,27 @@ class FamilyService:
                     if found
                     else None
                 )
+
+    def _repos_for(self, issue_id: str, team_repo: str) -> list[str]:
+        """The team's repo first, then any other repo a PR of this ticket was seen in.
+
+        A ticket can belong to a team mapped to one repo while its PR lives in another
+        (an SLM ticket for the Street repo), so looking only in the team repo reads
+        an open PR as "not started".
+        """
+        repos = [team_repo]
+        session = self._sessions.get(issue_id)
+        if session:
+            urls = list(session.labelled)
+            try:
+                urls += session.pr_urls()
+            except Exception:  # a dead terminal must not break the lookup
+                logger.debug("No PR links readable for %s", issue_id)
+            for url in urls:
+                match = re.match(r"https://github\.com/([\w.-]+/[\w.-]+)/pull/", url)
+                if match and match.group(1) not in repos:
+                    repos.append(match.group(1))
+        return repos
 
     def resolve(self, parent: Issue) -> list[ChildState]:
         team = self._settings.team_for(parent.team)

@@ -92,3 +92,32 @@ def test_queued_children_show_as_queued(tmp_path):
     )
     sessions._queue.append({"issue": {"id": "ABC-11"}, "mode": "plan", "base": "main"})
     assert family.groups()[0]["children"][0]["kind"] == "queued"
+
+
+def test_a_pr_in_another_repo_than_the_teams_still_counts_as_open(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+
+    from cyclecontrol import family as family_module
+    from cyclecontrol.github import PrState
+
+    svc, sessions, _ = build(
+        tmp_path, [item("ABC-10", children=True), item("ABC-11", parent="ABC-10")]
+    )
+    session = SimpleNamespace(labelled=["https://github.com/Org/other-repo/pull/9"], pr_urls=list)
+    monkeypatch.setattr(sessions, "get", lambda issue_id: session)
+    seen = []
+
+    def fake_find(repo, branch):
+        seen.append(repo)
+        if repo == "Org/other-repo":
+            return PrState(
+                9, "https://github.com/Org/other-repo/pull/9", branch, "OPEN", "main", "s"
+            )
+        return None
+
+    monkeypatch.setattr(family_module, "find_pr_any_state", fake_find)
+    svc.refresh()
+    (group,) = svc.groups()
+    child = next(c for c in group["children"] if c["id"] == "ABC-11")
+    assert child["kind"] == "pr_open" and child["prNumber"] == 9
+    assert seen[-1] == "Org/other-repo" and len(seen) == 2
