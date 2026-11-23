@@ -120,4 +120,30 @@ def test_a_pr_in_another_repo_than_the_teams_still_counts_as_open(tmp_path, monk
     (group,) = svc.groups()
     child = next(c for c in group["children"] if c["id"] == "ABC-11")
     assert child["kind"] == "pr_open" and child["prNumber"] == 9
-    assert seen[-1] == "Org/other-repo" and len(seen) == 2
+    assert "Org/other-repo" in seen
+
+
+def test_a_finished_builder_with_no_link_is_found_in_the_known_repos(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+
+    from cyclecontrol import family as family_module
+    from cyclecontrol.github import PrState
+
+    svc, sessions, _ = build(
+        tmp_path, [item("ABC-10", children=True), item("ABC-11", parent="ABC-10")]
+    )
+    session = SimpleNamespace(labelled=[], pr_urls=lambda: [])
+    monkeypatch.setattr(sessions, "get", lambda issue_id: session)
+
+    def fake_find(repo, branch):
+        if repo == "AgentSoftware/street":
+            return PrState(
+                5, "https://github.com/AgentSoftware/street/pull/5", branch, "MERGED", "main", "s"
+            )
+        return None
+
+    monkeypatch.setattr(family_module, "find_pr_any_state", fake_find)
+    svc.refresh()
+    (group,) = svc.groups()
+    child = next(c for c in group["children"] if c["id"] == "ABC-11")
+    assert child["kind"] == "done" and child["prNumber"] == 5

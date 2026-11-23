@@ -8,6 +8,7 @@ import re
 from typing import Any
 
 from cyclecontrol.board import Board
+from cyclecontrol.comments import REPO_MERGE_LABELS
 from cyclecontrol.config import Settings, TeamConfig
 from cyclecontrol.github import GithubError, find_pr_any_state
 from cyclecontrol.models import Issue
@@ -101,6 +102,8 @@ class FamilyService:
                 match = re.match(r"https://github\.com/([\w.-]+/[\w.-]+)/pull/", url)
                 if match and match.group(1) not in repos:
                     repos.append(match.group(1))
+            # A finished builder keeps no readable link, so try the other repos builders work in.
+            repos += [r for r in REPO_MERGE_LABELS if r not in repos]
         return repos
 
     def resolve(self, parent: Issue) -> list[ChildState]:
