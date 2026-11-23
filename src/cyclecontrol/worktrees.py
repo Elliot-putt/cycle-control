@@ -69,7 +69,26 @@ def needs_provision(path: Path) -> bool:
     return not has_slug or ready in ("", "none")
 
 
-def provision(path: Path) -> None:
+def has_provision_recipe(path: Path) -> bool:
+    """True when the repo defines `just worktree-provision` (consumer-v3 does not)."""
+    try:
+        found = subprocess.run(
+            ["just", "--show", "worktree-provision"],
+            cwd=path,
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+    return found.returncode == 0
+
+
+def provision(path: Path) -> bool:
+    """Provision the worktree; False (and nothing run) when the repo has no recipe for it."""
+    if not has_provision_recipe(path):
+        return False
     result = subprocess.run(
         ["just", "worktree-provision"],
         cwd=path,
@@ -80,6 +99,7 @@ def provision(path: Path) -> None:
     )
     if result.returncode != 0:
         raise WorktreeError(f"worktree-provision failed: {result.stderr.strip()[-300:]}")
+    return True
 
 
 def git_dir(path: Path) -> Path:
