@@ -95,7 +95,7 @@ class FamilyService:
             urls = list(session.labelled)
             try:
                 urls += session.pr_urls()
-            except Exception:  # a dead terminal must not break the lookup
+            except (OSError, ValueError):  # a dead terminal must not break the lookup
                 logger.debug("No PR links readable for %s", issue_id)
             for url in urls:
                 match = re.match(r"https://github\.com/([\w.-]+/[\w.-]+)/pull/", url)
