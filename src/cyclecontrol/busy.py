@@ -6,7 +6,7 @@ import time
 from collections.abc import Callable
 
 WORK = re.compile(
-    r"gates\.sh|\bjust (lint|test|test-\w+|types|build|format)\b|vendor/bin/(pest|phpunit|phpstan|pint)|\bvitest\b|artisan test|\bpest\b"
+    r"gates\.sh|\bjust (lint|test|test-\w+|types|build|format)\b|vendor/bin/(pest|phpunit|phpstan|pint)|\bvitest\b|artisan test|\bpest\b|worktree-provision"
 )
 CACHE_SECONDS = 5.0
 

@@ -65,3 +65,11 @@ def test_one_process_table_serves_every_builder():
     now[0] = 6.0
     watcher.running(20)
     assert len(calls) == 2
+
+
+def test_a_worktree_provision_under_the_builder_counts_as_busy():
+    rows = [
+        (10, 1, "claude --agent spp-builder"),
+        (11, 10, "/bin/zsh -c DB=isolated make worktree-provision"),
+    ]
+    assert WorkWatcher(table(*rows)).running(10) is True
