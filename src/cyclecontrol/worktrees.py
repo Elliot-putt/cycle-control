@@ -29,6 +29,12 @@ def ensure_worktree(team: TeamConfig, issue: Issue, base: str) -> Path:
     if path.exists():
         return path
     fetched = _git("-C", repo, "fetch", "origin", base)
+    if fetched.returncode != 0 and "couldn't find remote ref" in fetched.stderr:
+        # A stacked base (the blocker's PR branch) can live in another repo than the team's:
+        # an SLM ticket for Street stacks on a Street branch. The builder works from the
+        # base it is told; this worktree only needs somewhere to start.
+        base = team.base_branch
+        fetched = _git("-C", repo, "fetch", "origin", base)
     if fetched.returncode != 0:
         raise WorktreeError(f"git fetch failed: {fetched.stderr.strip()}")
     added = _git("-C", repo, "worktree", "add", str(path), "-b", issue.branch, f"origin/{base}")
