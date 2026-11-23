@@ -132,7 +132,7 @@ def test_a_finished_builder_with_no_link_is_found_in_the_known_repos(tmp_path, m
     svc, sessions, _ = build(
         tmp_path, [item("ABC-10", children=True), item("ABC-11", parent="ABC-10")]
     )
-    session = SimpleNamespace(labelled=[], pr_urls=lambda: [])
+    session = SimpleNamespace(labelled=[], pr_urls=list)
     monkeypatch.setattr(sessions, "get", lambda issue_id: session)
 
     def fake_find(repo, branch):
